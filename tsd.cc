@@ -72,8 +72,8 @@ struct Client
   std::string username;
   bool connected = true;
   int following_file_size = 0;
-  std::vector<Client *> client_followers;
-  std::vector<Client *> client_following;
+  std::vector<Client *>* client_followers;
+  std::vector<Client *>* client_following;
   ServerReaderWriter<Message, Message> *stream = 0;
   bool operator==(const Client &c1) const
   {
@@ -82,7 +82,7 @@ struct Client
 };
 
 // Vector that stores every client that has been created
-std::vector<Client> client_db;
+std::vector<Client*> client_db;
 
 Client *getUser(string username)
 {
@@ -90,7 +90,7 @@ Client *getUser(string username)
   for (int i = 0; i < client_db.size(); i++)
   {
     // check if user name is in client db
-    c = &client_db[i];
+    c = client_db[i];
     if (c->username == username)
     {
       return c;
@@ -108,13 +108,16 @@ class SNSServiceImpl final : public SNSService::Service
     string name = request->username();
     curUser = getUser(name);
     Client c;
+    std::cout << "Followers array size " << curUser->client_followers->size() << std::endl;
+    std::cout << "All users array size " << client_db.size() << std::endl;
     for (int i = 0; i < client_db.size(); i++)
     {
-      list_reply->add_all_users(client_db[i].username);
+      list_reply->add_all_users(client_db[i]->username);
     }
-    for (int i = 0; i < curUser->client_followers.size(); i++)
+    for (int i = 0; i < curUser->client_followers->size(); i++)
     {
-      list_reply->add_followers(curUser->client_followers[i]->username);
+      std::cout<<curUser->client_followers->at(i)->username.length()<<std::endl;
+      list_reply->add_followers(curUser->client_followers->at(i)->username);
     }
     return Status::OK;
   }
@@ -134,30 +137,30 @@ class SNSServiceImpl final : public SNSService::Service
     }
     // check if curUser is following userToFollow, else add to following list
     int flwFlag = 0;
-    for (int i = 0; i < curUser->client_following.size(); i++)
+    for (int i = 0; i < curUser->client_following->size(); i++)
     {
       // implicit conversion of ptr userToFollow to reference
-      if (curUser->client_following[i] == userToFollow)
+      if (curUser->client_following->at(i) == userToFollow)
       {
         flwFlag++;
       }
     }
     if (!flwFlag)
     {
-      curUser->client_following.push_back(userToFollow);
+      curUser->client_following->push_back(userToFollow);
     }
     // add curUser to userToFollow's followers list
     flwFlag = 0;
-    for (int i = 0; i < userToFollow->client_followers.size(); i++)
+    for (int i = 0; i < userToFollow->client_followers->size(); i++)
     {
-      if (userToFollow->client_followers[i] == curUser)
+      if (userToFollow->client_followers->at(i) == curUser)
       {
         flwFlag++;
       }
     }
     if (!flwFlag)
     {
-      userToFollow->client_followers.push_back(curUser);
+      userToFollow->client_followers->push_back(curUser);
     }
     reply->set_msg(name + " is following " + userNameToFollow);
     return Status::OK;
@@ -178,9 +181,9 @@ class SNSServiceImpl final : public SNSService::Service
     }
     // if curUser is following userToFollow, remove from following array, else return error
     int flwidx = -1;
-    for (int i = 0; i < curUser->client_following.size(); i++)
+    for (int i = 0; i < curUser->client_following->size(); i++)
     {
-      if (curUser->client_following[i] == userToUnFollow)
+      if (curUser->client_following->at(i) == userToUnFollow)
       {
         flwidx = i;
       }
@@ -191,12 +194,12 @@ class SNSServiceImpl final : public SNSService::Service
       return Status::OK;
     }
     // remove user to unfollow
-    curUser->client_following.erase(curUser->client_following.begin() + flwidx);
+    curUser->client_following->erase(curUser->client_following->begin() + flwidx);
     // if userToUnfollow has follower curUser, remove from  array, else return error
     flwidx = -1;
-    for (int i = 0; i < userToUnFollow->client_followers.size(); i++)
+    for (int i = 0; i < userToUnFollow->client_followers->size(); i++)
     {
-      if (userToUnFollow->client_followers[i] == curUser)
+      if (userToUnFollow->client_followers->at(i) == curUser)
       {
         flwidx = i;
       }
@@ -206,7 +209,7 @@ class SNSServiceImpl final : public SNSService::Service
       reply->set_msg("FAILURE_NOT_A_FOLLOWER: Failed with not a follower.");
       return Status::OK;
     }
-    userToUnFollow->client_followers.erase(userToUnFollow->client_followers.begin() + flwidx);
+    userToUnFollow->client_followers->erase(userToUnFollow->client_followers->begin() + flwidx);
     reply->set_msg(name + " unfollowed " + userNameToUnFollow);
     return Status::OK;
   }
@@ -221,6 +224,8 @@ class SNSServiceImpl final : public SNSService::Service
     {
       // client doesn't exist
       c = new Client;
+      c->client_followers = new std::vector<Client*>();
+      c->client_following = new std::vector<Client*>();
     }
     else
     {
@@ -228,7 +233,7 @@ class SNSServiceImpl final : public SNSService::Service
       return Status::OK;
     }
     c->username = name;
-    client_db.push_back((*c));
+    client_db.push_back(c);
     cout << "User " + name + " is connected." << endl;
     return Status::OK;
   }
