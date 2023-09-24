@@ -131,19 +131,21 @@ void IClient::toUpperCase(std::string &str) const
  */
 std::string getPostMessage()
 {
-  char buf[MAX_DATA];
-  while (1)
-  {
-    fgets(buf, MAX_DATA, stdin);
-    if (buf[0] != '\n')
-      break;
-  }
+  // char buf[MAX_DATA];
+  // while (1)
+  // {
+  //   fgets(buf, MAX_DATA, stdin);
+  //   if (buf[0] != '\n')
+  //     break;
+  // }
 
-  std::string message(buf);
-  return message;
+  // std::string message(buf);
+  std::string input;
+  std::getline(std::cin, input);
+  return input;
 }
 
-void displayPostMessage(const std::string &sender, const std::string &message, std::time_t &time)
+void displayPostMessage(const std::string &sender, const std::string &message, std::time_t time)
 {
   std::string t_str(std::ctime(&time));
   t_str[t_str.size() - 1] = '\0';

@@ -45,6 +45,8 @@
 #include <google/protobuf/util/time_util.h>
 #include <grpc++/grpc++.h>
 #include <glog/logging.h>
+#include <sys/stat.h>
+
 #define log(severity, msg) \
   LOG(severity) << msg;    \
   google::FlushLogFiles(google::severity);
@@ -72,8 +74,8 @@ struct Client
   std::string username;
   bool connected = true;
   int following_file_size = 0;
-  std::vector<Client *>* client_followers;
-  std::vector<Client *>* client_following;
+  std::vector<Client *> *client_followers;
+  std::vector<Client *> *client_following;
   ServerReaderWriter<Message, Message> *stream = 0;
   bool operator==(const Client &c1) const
   {
@@ -82,7 +84,7 @@ struct Client
 };
 
 // Vector that stores every client that has been created
-std::vector<Client*> client_db;
+std::vector<Client *> client_db;
 
 Client *getUser(string username)
 {
@@ -116,7 +118,7 @@ class SNSServiceImpl final : public SNSService::Service
     }
     for (int i = 0; i < curUser->client_followers->size(); i++)
     {
-      std::cout<<curUser->client_followers->at(i)->username.length()<<std::endl;
+      std::cout << curUser->client_followers->at(i)->username.length() << std::endl;
       list_reply->add_followers(curUser->client_followers->at(i)->username);
     }
     return Status::OK;
@@ -224,14 +226,30 @@ class SNSServiceImpl final : public SNSService::Service
     {
       // client doesn't exist
       c = new Client;
-      c->client_followers = new std::vector<Client*>();
-      c->client_following = new std::vector<Client*>();
+      c->client_followers = new std::vector<Client *>();
+      c->client_following = new std::vector<Client *>();
     }
     else
     {
       reply->set_msg("FAILURE_NOT_EXISTS: User already exists.");
       return Status::OK;
     }
+    // Create timeline file
+    const std::string folder_path = "db";
+    mkdir(folder_path.c_str(), 0777);
+    // Open the file in output mode (std::ios::out)
+    std::ofstream outfile("db/" + name + "_tl.txt", std::ios::out);
+    if (outfile.is_open())
+    {
+      // Close the file when done
+      outfile.close();
+      std::cout << "Timeline File created for " + name << std::endl;
+    }
+    else
+    {
+      std::cerr << "Failed to open the file for " + name << std::endl;
+    }
+
     c->username = name;
     client_db.push_back(c);
     cout << "User " + name + " is connected." << endl;
@@ -241,12 +259,146 @@ class SNSServiceImpl final : public SNSService::Service
   Status Timeline(ServerContext *context,
                   ServerReaderWriter<Message, Message> *stream) override
   {
-
-    /*********
-    YOUR CODE HERE
-    **********/
-
+    Message m;
+    while (stream->Read(&m))
+    {
+      std::string username = m.username();
+      Client *c = getUser(username);
+      c->stream = stream;
+      if (m.is_initial() == 1)
+      { // initial message
+        // last20 = read 20 latest massages from file currentuser_timelinej
+        std::vector<std::vector<std::string>> msgs = get_last_20_messages(username);
+        for (int i = 0; i < msgs.size(); i++)
+        {
+          Message m1;
+          Timestamp t1;
+          google::protobuf::util::TimeUtil::FromString(msgs[i][0], &t1);
+          m1.set_allocated_timestamp(&t1);
+          m1.set_username(msgs[i][1]);
+          m1.set_msg(msgs[i][2]);
+          stream->Write(m1);
+          m1.release_timestamp();
+        }
+      }
+      else
+      {
+        // append message to all the followers of current user (cu2_timeline.txt) etc
+        for (int i = 0; i < c->client_followers->size(); i++)
+        {
+          append_to_timeline(c->client_followers->at(i)->username, m.username(), m.timestamp(), m.msg());
+        }
+        for (int i = 0; i < c->client_followers->size(); i++)
+        {
+          Client *cc = c->client_followers->at(i);
+          if (cc->stream != nullptr)
+            cc->stream->Write(m);
+        }
+      }
+    }
     return Status::OK;
+  }
+
+  void append_to_timeline(std::string username, std::string puser, google::protobuf::Timestamp ptime,
+                          std::string ppost)
+  {
+
+    const std::string file_path = "db/" + username + "_tl.txt";
+
+    // Open the file in input mode to read the existing content
+    std::ifstream infile(file_path);
+
+    if (!infile)
+    {
+      std::cerr << "Failed to open the file." << std::endl;
+      return;
+    }
+
+    // Read the existing content line by line into a vector
+    std::vector<std::string> lines;
+    std::string line;
+
+    while (std::getline(infile, line))
+    {
+      lines.push_back(line);
+    }
+
+    infile.close();
+
+    // Open the file again in output mode to write the updated content
+    std::ofstream outfile(file_path);
+
+    if (!outfile)
+    {
+      std::cerr << "Failed to open the file for writing." << std::endl;
+      return;
+    }
+
+    // Append new strings at the top of the file
+    std::vector<std::string> newStrings = {"T " + google::protobuf::util::TimeUtil::ToString(ptime) + "\n",
+                                           "U " + puser + "\n",
+                                           "W " + ppost + "\n"};
+
+    for (const std::string &newString : newStrings)
+    {
+      outfile << newString;
+    }
+
+    // Append the existing content after the new strings
+    for (const std::string &existingLine : lines)
+    {
+      outfile << existingLine << std::endl;
+    }
+
+    outfile.close();
+
+    std::cout << "Strings appended to the top of the file." << std::endl;
+  }
+
+  /// @brief Gets the last 20 messages saved to the user's timeline
+  /// @param username
+  /// @return
+  std::vector<std::vector<std::string>> get_last_20_messages(std::string username)
+  {
+    std::string file_path = "db/" + username + "_tl.txt";
+    // Open the file in input mode to read the existing content
+    std::ifstream infile(file_path);
+
+    if (!infile)
+    {
+      std::cerr << "Failed to open the file." << std::endl;
+    }
+
+    // Read the existing content line by line into a vector
+    std::vector<std::string> lines;
+    std::string line;
+
+    while (std::getline(infile, line))
+    {
+      lines.push_back(line);
+    }
+
+    std::vector<std::vector<std::string>> messages;
+    int ct = 0;
+    for (int i = 0; i < lines.size();)
+    {
+      if (ct == 20)
+        break;
+
+      std::vector<std::string> reply_msg;
+      for (int j = 0; j < 3; j++)
+      {
+        if (lines[i + j].back() == '\n')
+        {
+          lines[i + j].pop_back();
+        }
+        reply_msg.push_back(lines[i + j].substr(2));
+      }
+      messages.push_back(reply_msg);
+      ct++;
+      i += 3;
+    }
+    return messages;
   }
 };
 

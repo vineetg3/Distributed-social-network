@@ -65,4 +65,6 @@ message Message {
   string msg = 2;
   //Time the message was sent
   google.protobuf.Timestamp timestamp = 3;
+  //is initial message
+  int32 is_initial = 4;
 }

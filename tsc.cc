@@ -6,6 +6,8 @@
 #include <unistd.h>
 #include <csignal>
 #include <grpc++/grpc++.h>
+#include <google/protobuf/timestamp.pb.h>
+#include <google/protobuf/util/time_util.h>
 #include "client.h"
 
 #include "sns.grpc.pb.h"
@@ -180,6 +182,7 @@ IReply Client::processCommand(std::string &input)
   }
   else if (tokens[0] == "TIMELINE")
   {
+    Client::processTimeline();
   }
   return ire;
 }
@@ -332,9 +335,48 @@ void Client::Timeline(const std::string &username)
   // CTRL-C (SIGINT)
   // ------------------------------------------------------------
 
-  /***
-  YOUR CODE HERE
-  ***/
+  // 1 writer thread
+  // current thread is reader
+  // initially send initial message
+
+  ClientContext context;
+
+  std::shared_ptr<ClientReaderWriter<Message, Message>> stream(
+      stub_->Timeline(&context));
+  Message m;
+  m.set_is_initial(1);
+  m.set_username(username);
+  stream->Write(m);
+
+  std::thread writer([stream, username]()
+                     {
+      while(1){
+        std::string ip = getPostMessage();
+        Message m;
+        m.set_username(username);
+        m.set_msg(ip);
+        std::cout<<"HERE "+ip<<std::endl;
+        // Create and set a timestamp
+        google::protobuf::Timestamp timestamp = google::protobuf::util::TimeUtil::GetCurrentTime();
+        m.set_allocated_timestamp(&timestamp);
+        stream->Write(m);
+        m.release_timestamp();
+      } });
+
+  Message server_msg;
+  while (stream->Read(&server_msg))
+  {
+    std::cout<<"client reading"<<std::endl;
+    google::protobuf::Timestamp timestamp_value = server_msg.timestamp();
+    displayPostMessage(server_msg.username(), server_msg.msg(),
+                       google::protobuf::util::TimeUtil::TimestampToTimeT(timestamp_value));
+  }
+  writer.join();
+  Status status = stream->Finish();
+  if (!status.ok())
+  {
+    std::cout << " rpc failed." << std::endl;
+  }
 }
 
 //////////////////////////////////////////////
