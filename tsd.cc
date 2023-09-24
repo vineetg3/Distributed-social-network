@@ -237,23 +237,34 @@ class SNSServiceImpl final : public SNSService::Service
     // Create timeline file
     const std::string folder_path = "db";
     mkdir(folder_path.c_str(), 0777);
-    // Open the file in output mode (std::ios::out)
-    std::ofstream outfile("db/" + name + "_tl.txt", std::ios::out);
-    if (outfile.is_open())
-    {
-      // Close the file when done
-      outfile.close();
-      std::cout << "Timeline File created for " + name << std::endl;
-    }
-    else
-    {
-      std::cerr << "Failed to open the file for " + name << std::endl;
-    }
+    // Open the file in append
+    create_or_check_file("tl",name);
+    // create_or_check_file("followers",name);
+    // create_or_check_file("following",name);
 
     c->username = name;
     client_db.push_back(c);
     cout << "User " + name + " is connected." << endl;
     return Status::OK;
+  }
+
+  void create_or_check_file(std::string attr,std::string name){
+    // Open the file in append
+    std::ofstream outfile("db/" + name + "_"+attr+".txt", std::ios::app);
+    if (outfile.is_open())
+    {
+      // Close the file when done
+      outfile.close();
+      std::cout << attr+" File created for " + name << std::endl;
+    }
+    else
+    {
+      std::cerr << attr+ " Failed to open the file for " + name << std::endl;
+    }
+  }
+
+  void load_followers(Client* c,std::string username){
+
   }
 
   Status Timeline(ServerContext *context,

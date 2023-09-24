@@ -4,3 +4,4 @@
 *.pb.h
 tsc
 tsd
+db/
