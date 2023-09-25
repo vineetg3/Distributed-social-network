@@ -59,7 +59,7 @@ message Reply {
 }
 
 message Message {
-  //Username who sent the message
+  //Username who sent the messagere
   string username = 1;
   //Message from the user
   string msg = 2;

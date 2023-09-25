@@ -86,6 +86,9 @@ struct Client
 // Vector that stores every client that has been created
 std::vector<Client *> client_db;
 
+/// @brief Get's the user from client_db given username.
+/// @param username
+/// @return
 Client *getUser(string username)
 {
   Client *c;
@@ -99,6 +102,18 @@ Client *getUser(string username)
     }
   }
   return NULL;
+}
+
+Message MakeMessage(const std::string &username, const std::string &msg)
+{
+  Message m;
+  m.set_username(username);
+  m.set_msg(msg);
+  google::protobuf::Timestamp *timestamp = new google::protobuf::Timestamp();
+  timestamp->set_seconds(time(NULL));
+  timestamp->set_nanos(0);
+  m.set_allocated_timestamp(timestamp);
+  return m;
 }
 
 class SNSServiceImpl final : public SNSService::Service
@@ -130,14 +145,24 @@ class SNSServiceImpl final : public SNSService::Service
     Client *userToFollow;
     string name = request->username();
     string userNameToFollow = request->arguments(0);
+
+    // If both current user and user to follow are the same throw error
+    if (name == userNameToFollow)
+    {
+      reply->set_msg("FAILURE_ALREADY_EXISTS: Cannot follow yourself.");
+      return Status::OK;
+    }
     curUser = getUser(name);
     userToFollow = getUser(userNameToFollow);
+
+    // If user to follow doesn't exist throw error
     if (userToFollow == NULL)
     {
       reply->set_msg("FAILURE_INVALID_USERNAME: User " + userNameToFollow + " does not exist.");
       return Status::OK;
     }
-    // check if curUser is following userToFollow, else add to following list
+
+    // check if curUser is following userToFollow,If not add to following list
     int flwFlag = 0;
     for (int i = 0; i < curUser->client_following->size(); i++)
     {
@@ -151,6 +176,7 @@ class SNSServiceImpl final : public SNSService::Service
     {
       curUser->client_following->push_back(userToFollow);
     }
+
     // add curUser to userToFollow's followers list
     flwFlag = 0;
     for (int i = 0; i < userToFollow->client_followers->size(); i++)
@@ -164,6 +190,7 @@ class SNSServiceImpl final : public SNSService::Service
     {
       userToFollow->client_followers->push_back(curUser);
     }
+
     reply->set_msg(name + " is following " + userNameToFollow);
     return Status::OK;
   }
@@ -174,13 +201,24 @@ class SNSServiceImpl final : public SNSService::Service
     Client *userToUnFollow;
     string name = request->username();
     string userNameToUnFollow = request->arguments(0);
+
+    /// If both current user and user to follow are the same throw error.
+    if (name == userNameToUnFollow)
+    {
+      reply->set_msg("FAILURE_INVALID_USERNAME: Cannot unfollow yourself.");
+      return Status::OK;
+    }
+
     curUser = getUser(name);
     userToUnFollow = getUser(userNameToUnFollow);
+
+    // If user To unfollow does not exist throw error.
     if (userToUnFollow == NULL)
     {
       reply->set_msg("FAILURE_INVALID_USERNAME: User " + userNameToUnFollow + " does not exist.");
       return Status::OK;
     }
+
     // if curUser is following userToFollow, remove from following array, else return error
     int flwidx = -1;
     for (int i = 0; i < curUser->client_following->size(); i++)
@@ -188,6 +226,7 @@ class SNSServiceImpl final : public SNSService::Service
       if (curUser->client_following->at(i) == userToUnFollow)
       {
         flwidx = i;
+        break;
       }
     }
     if (flwidx == -1)
@@ -195,8 +234,10 @@ class SNSServiceImpl final : public SNSService::Service
       reply->set_msg("FAILURE_NOT_A_FOLLOWER: Failed with not a follower.");
       return Status::OK;
     }
+
     // remove user to unfollow
     curUser->client_following->erase(curUser->client_following->begin() + flwidx);
+
     // if userToUnfollow has follower curUser, remove from  array, else return error
     flwidx = -1;
     for (int i = 0; i < userToUnFollow->client_followers->size(); i++)
@@ -204,6 +245,7 @@ class SNSServiceImpl final : public SNSService::Service
       if (userToUnFollow->client_followers->at(i) == curUser)
       {
         flwidx = i;
+        break;
       }
     }
     if (flwidx == -1)
@@ -212,6 +254,7 @@ class SNSServiceImpl final : public SNSService::Service
       return Status::OK;
     }
     userToUnFollow->client_followers->erase(userToUnFollow->client_followers->begin() + flwidx);
+
     reply->set_msg(name + " unfollowed " + userNameToUnFollow);
     return Status::OK;
   }
@@ -231,16 +274,14 @@ class SNSServiceImpl final : public SNSService::Service
     }
     else
     {
+      // client exists so set error message and return
       reply->set_msg("FAILURE_NOT_EXISTS: User already exists.");
       return Status::OK;
     }
-    // Create timeline file
+    // Create timeline file. Place it in db folder with name username_tl.txt
     const std::string folder_path = "db";
     mkdir(folder_path.c_str(), 0777);
-    // Open the file in append
-    create_or_check_file("tl",name);
-    // create_or_check_file("followers",name);
-    // create_or_check_file("following",name);
+    create_or_check_file("tl", name);
 
     c->username = name;
     client_db.push_back(c);
@@ -248,60 +289,56 @@ class SNSServiceImpl final : public SNSService::Service
     return Status::OK;
   }
 
-  void create_or_check_file(std::string attr,std::string name){
+  void create_or_check_file(std::string attr, std::string name)
+  {
     // Open the file in append
-    std::ofstream outfile("db/" + name + "_"+attr+".txt", std::ios::app);
+    std::ofstream outfile("db/" + name + "_" + attr + ".txt", std::ios::app);
     if (outfile.is_open())
     {
       // Close the file when done
       outfile.close();
-      std::cout << attr+" File created for " + name << std::endl;
+      std::cout << attr + " File created for " + name << std::endl;
     }
     else
     {
-      std::cerr << attr+ " Failed to open the file for " + name << std::endl;
+      std::cerr << attr + " Failed to open the file for " + name << std::endl;
     }
-  }
-
-  void load_followers(Client* c,std::string username){
-
   }
 
   Status Timeline(ServerContext *context,
                   ServerReaderWriter<Message, Message> *stream) override
   {
+
     Message m;
     while (stream->Read(&m))
     {
       std::string username = m.username();
       Client *c = getUser(username);
-      c->stream = stream;
+
+      // save the stream to client object, for subsequent writes
       if (m.is_initial() == 1)
-      { // initial message
-        // last20 = read 20 latest massages from file currentuser_timelinej
+        c->stream = stream;
+
+      // If the message is initial, i.e Just started timeline mode, we send back, the latest 20 messages
+      // by reading the user_tl file.
+
+      if (m.is_initial() == 1)
+      {
+        // read 20 latest massages from file currentuser_timeline
         std::vector<std::vector<std::string>> msgs = get_last_20_messages(username);
         for (int i = 0; i < msgs.size(); i++)
         {
-          Message m1;
-          Timestamp t1;
-          google::protobuf::util::TimeUtil::FromString(msgs[i][0], &t1);
-          m1.set_allocated_timestamp(&t1);
-          m1.set_username(msgs[i][1]);
-          m1.set_msg(msgs[i][2]);
+          Message m1 = MakeMessage(msgs[i][1], msgs[i][2]);
           stream->Write(m1);
-          m1.release_timestamp();
         }
       }
       else
       {
-        // append message to all the followers of current user (cu2_timeline.txt) etc
-        for (int i = 0; i < c->client_followers->size(); i++)
-        {
-          append_to_timeline(c->client_followers->at(i)->username, m.username(), m.timestamp(), m.msg());
-        }
+        //loop through the followers list to send messages and append to follower's timeline
         for (int i = 0; i < c->client_followers->size(); i++)
         {
           Client *cc = c->client_followers->at(i);
+          append_to_timeline(c->client_followers->at(i)->username, m.username(), m.timestamp(), m.msg());
           if (cc->stream != nullptr)
             cc->stream->Write(m);
         }
@@ -372,6 +409,7 @@ class SNSServiceImpl final : public SNSService::Service
   std::vector<std::vector<std::string>> get_last_20_messages(std::string username)
   {
     std::string file_path = "db/" + username + "_tl.txt";
+
     // Open the file in input mode to read the existing content
     std::ifstream infile(file_path);
 
@@ -389,8 +427,12 @@ class SNSServiceImpl final : public SNSService::Service
       lines.push_back(line);
     }
 
+    // Messages vector will be populated to the scheme
+    //{{timestamp1,username1,msg1},{timestamp2,username2,msg2}..}
     std::vector<std::vector<std::string>> messages;
     int ct = 0;
+
+    // Process every set of 3 lines(timestamp,user,msg) and push to vector
     for (int i = 0; i < lines.size();)
     {
       if (ct == 20)
@@ -403,6 +445,7 @@ class SNSServiceImpl final : public SNSService::Service
         {
           lines[i + j].pop_back();
         }
+        // slice the required string by removing the identifier i.e T, U, W
         reply_msg.push_back(lines[i + j].substr(2));
       }
       messages.push_back(reply_msg);

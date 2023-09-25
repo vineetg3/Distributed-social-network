@@ -28,6 +28,11 @@ void sig_ignore(int sig)
   std::cout << "Signal caught " + sig;
 }
 
+/// @brief Check if error message contains error identifier.
+//        Such as, FAILURE_NOT_EXISTS,FAILURE_ALREADY_EXISTS etc
+/// @param error
+/// @param code
+/// @return
 bool isErrorCodeExists(std::string error, std::string code)
 {
   return error.find(code) != std::string::npos;
@@ -182,6 +187,7 @@ IReply Client::processCommand(std::string &input)
   }
   else if (tokens[0] == "TIMELINE")
   {
+    std::cout << "Now you are in the timeline" << std::endl;
     Client::processTimeline();
   }
   return ire;
@@ -230,14 +236,20 @@ IReply Client::Follow(const std::string &username2)
   grpc::Status status;
 
   request.set_username(username);
+
+  // append user to follow to repeated field 'arguements'
   request.add_arguments(username2);
+
   status = stub_->Follow(&contex, request, &reply);
   if (status.ok())
   {
-    std::cout << reply.msg() << std::endl;
     if (isErrorCodeExists(reply.msg(), "FAILURE_INVALID_USERNAME"))
     {
       ire.comm_status = IStatus::FAILURE_INVALID_USERNAME;
+    }
+    else if (isErrorCodeExists(reply.msg(), "FAILURE_ALREADY_EXISTS"))
+    {
+      ire.comm_status = IStatus::FAILURE_ALREADY_EXISTS;
     }
     else
     {
@@ -262,7 +274,6 @@ IReply Client::UnFollow(const std::string &username2)
   status = stub_->UnFollow(&contex, request, &reply);
   if (status.ok())
   {
-    std::cout << reply.msg() << std::endl;
     if (isErrorCodeExists(reply.msg(), "FAILURE_INVALID_USERNAME"))
     {
       ire.comm_status = IStatus::FAILURE_INVALID_USERNAME;
@@ -270,6 +281,10 @@ IReply Client::UnFollow(const std::string &username2)
     else if (isErrorCodeExists(reply.msg(), "FAILURE_NOT_A_FOLLOWER"))
     {
       ire.comm_status = IStatus::FAILURE_NOT_A_FOLLOWER;
+    }
+    else if (isErrorCodeExists(reply.msg(), "FAILURE_ALREADY_EXISTS"))
+    {
+      ire.comm_status = IStatus::FAILURE_ALREADY_EXISTS;
     }
     else
     {
@@ -288,21 +303,17 @@ IReply Client::Login()
   ClientContext context;
   Request request;
   Reply reply;
-  std::cout << username + "HERE" << std::endl;
   request.set_username(username);
   // we need to send the address of context and reply object as gRPC receives it as a pointer with the address
   Status status = stub_->Login(&context, request, &reply);
-  std::cout << "" << std::endl;
   if (status.ok())
   {
-    std::cout << reply.msg() << std::endl;
     if (isErrorCodeExists(reply.msg(), "FAILURE_NOT_EXISTS"))
     {
       ire.comm_status = IStatus::FAILURE_NOT_EXISTS;
     }
     else
     {
-      std::cout << "LOGIN SUCCESSFUL" << std::endl;
       ire.comm_status = IStatus::SUCCESS;
     }
   }
@@ -341,36 +352,37 @@ void Client::Timeline(const std::string &username)
 
   ClientContext context;
 
+  // intializing the stream object
   std::shared_ptr<ClientReaderWriter<Message, Message>> stream(
       stub_->Timeline(&context));
   Message m;
+
+  // As timeline just started, the first message should be set with initial parameter as 1.
+  // I defined this new parameter for this reason.
   m.set_is_initial(1);
   m.set_username(username);
   stream->Write(m);
+  
 
+  //Create thread to read from terminal and write to stream
   std::thread writer([stream, username]()
                      {
       while(1){
         std::string ip = getPostMessage();
-        Message m;
-        m.set_username(username);
-        m.set_msg(ip);
-        std::cout<<"HERE "+ip<<std::endl;
-        // Create and set a timestamp
-        google::protobuf::Timestamp timestamp = google::protobuf::util::TimeUtil::GetCurrentTime();
-        m.set_allocated_timestamp(&timestamp);
+        Message m = MakeMessage(username,ip);
         stream->Write(m);
-        m.release_timestamp();
       } });
 
+  // The other main thread of execution will continously read from server writes
   Message server_msg;
   while (stream->Read(&server_msg))
   {
-    std::cout<<"client reading"<<std::endl;
     google::protobuf::Timestamp timestamp_value = server_msg.timestamp();
     displayPostMessage(server_msg.username(), server_msg.msg(),
                        google::protobuf::util::TimeUtil::TimestampToTimeT(timestamp_value));
   }
+
+  // Joining the threads. This won't be reached in MP1 as we aren't calling WritesDone()/ending the stream both ways
   writer.join();
   Status status = stream->Finish();
   if (!status.ok())
