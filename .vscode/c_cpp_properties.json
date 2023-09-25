@@ -5,7 +5,8 @@
             "includePath": [
                 "${workspaceFolder}/**",
                 "~",
-                "/home/csce662/.local/include"
+                "/home/csce662/.local/include",
+                "${workspaceFolder}-2"
             ],
             "defines": [],
             "compilerPath": "/usr/bin/gcc",
