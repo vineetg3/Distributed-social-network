@@ -9,12 +9,23 @@
 #include <google/protobuf/timestamp.pb.h>
 #include <google/protobuf/util/time_util.h>
 #include "client.h"
+#include <glog/logging.h>     // for LOG
+#include <glog/raw_logging.h> // for RAW_LOG
 
 #include "sns.grpc.pb.h"
+#include "coordinator.grpc.pb.h"
+
+using csce438::Confirmation;
+using csce438::CoordService;
+using csce438::ID;
 using csce438::ListReply;
 using csce438::Message;
+using csce438::Path;
+using csce438::PathAndData;
 using csce438::Reply;
+using csce438::ReplyStatus;
 using csce438::Request;
+using csce438::ServerInfo;
 using csce438::SNSService;
 using grpc::Channel;
 using grpc::ClientContext;
@@ -22,6 +33,17 @@ using grpc::ClientReader;
 using grpc::ClientReaderWriter;
 using grpc::ClientWriter;
 using grpc::Status;
+using namespace std;
+#define log(severity, msg) \
+  LOG(severity) << msg;    \
+  google::FlushLogFiles(google::severity);
+
+string coordinatorIP;
+string coordinatorPort;
+string serverIP;
+string serverPort;
+std::unique_ptr<CoordService::Stub> coord_stub_;
+std::string username;
 
 void sig_ignore(int sig)
 {
@@ -38,11 +60,10 @@ bool isErrorCodeExists(std::string error, std::string code)
   return error.find(code) != std::string::npos;
 }
 
-
 /// @brief Splits string based on delimiter.
-/// @param input 
-/// @param delimiter 
-/// @return 
+/// @param input
+/// @param delimiter
+/// @return
 std::vector<std::string> splitString(const std::string &input, char delimiter)
 {
   std::vector<std::string> result;
@@ -367,9 +388,8 @@ void Client::Timeline(const std::string &username)
   m.set_is_initial(1);
   m.set_username(username);
   stream->Write(m);
-  
 
-  //Create thread to read from terminal and write to stream
+  // Create thread to read from terminal and write to stream
   std::thread writer([stream, username]()
                      {
       while(1){
@@ -396,38 +416,77 @@ void Client::Timeline(const std::string &username)
   }
 }
 
+void connectToCoordinator()
+{
+  std::shared_ptr<Channel> channel = grpc::CreateChannel(coordinatorIP + ":" + coordinatorPort, grpc::InsecureChannelCredentials());
+  coord_stub_ = CoordService::NewStub(channel);
+}
+
+void getServerDetails()
+{
+  ClientContext context;
+  ID request;
+  ServerInfo response;
+  Status status = coord_stub_->GetServer(&context, request, &response);
+  serverIP = response.hostname();
+  serverPort = response.port();
+  if (status.ok())
+  {
+    log(INFO, "Server details fetched. IP: " << serverIP << " Port: " << serverPort);
+  }
+}
+
+void onStartUp()
+{
+  connectToCoordinator();
+  getServerDetails();
+}
+
 //////////////////////////////////////////////
 // Main Function
 /////////////////////////////////////////////
 int main(int argc, char **argv)
 {
 
-  std::string hostname = "localhost";
-  std::string username = "default";
   std::string port = "3010";
 
   int opt = 0;
-  while ((opt = getopt(argc, argv, "h:u:p:")) != -1)
+  int arglens = 0;
+  while ((opt = getopt(argc, argv, "h:u:p:k:")) != -1)
   {
     switch (opt)
     {
     case 'h':
-      hostname = optarg;
+      coordinatorIP = optarg;
+      arglens++;
       break;
     case 'u':
+      arglens++;
       username = optarg;
       break;
     case 'p':
       port = optarg;
       break;
+    case 'k':
+      arglens++;
+      coordinatorPort = optarg;
+      break;
     default:
       std::cout << "Invalid Command Line Argument\n";
     }
   }
+  if (arglens != 3)
+  {
+    std::cerr << "Arguments missing!\n";
+    exit(1);
+  }
 
-  std::cout << "Logging Initialized. Client starting...";
+  std::string log_file_name = std::string("server-") + port;
+  google::InitGoogleLogging(log_file_name.c_str());
+  log(INFO, "Logging Initialized. Client starting...");
 
-  Client myc(hostname, username, port);
+  onStartUp();
+  Client myc(serverIP, username, serverPort);
 
   myc.run();
 

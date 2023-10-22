@@ -1,65 +1,47 @@
-/*
- *
- * Copyright 2015, Google Inc.
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
- *
- *     * Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above
- * copyright notice, this list of conditions and the following disclaimer
- * in the documentation and/or other materials provided with the
- * distribution.
- *     * Neither the name of Google Inc. nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- */
-
 #include <ctime>
 
 #include <google/protobuf/timestamp.pb.h>
 #include <google/protobuf/duration.pb.h>
-
+#include <chrono>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <vector>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <memory>
 #include <string>
+#include <thread>
+#include <mutex>
 #include <stdlib.h>
 #include <unistd.h>
 #include <google/protobuf/util/time_util.h>
 #include <grpc++/grpc++.h>
-#include <glog/logging.h>
-#include <sys/stat.h>
+#include <glog/logging.h>     // for LOG
+#include <glog/raw_logging.h> // for RAW_LOG
 
 #define log(severity, msg) \
   LOG(severity) << msg;    \
   google::FlushLogFiles(google::severity);
 
 #include "sns.grpc.pb.h"
+#include "coordinator.grpc.pb.h"
 
+using csce438::Confirmation;
+using csce438::CoordService;
 using csce438::ListReply;
 using csce438::Message;
+using csce438::Path;
+using csce438::PathAndData;
 using csce438::Reply;
+using csce438::ReplyStatus;
 using csce438::Request;
+using csce438::ServerInfo;
 using csce438::SNSService;
 using google::protobuf::Duration;
 using google::protobuf::Timestamp;
+using grpc::Channel;
+using grpc::ClientContext;
 using grpc::Server;
 using grpc::ServerBuilder;
 using grpc::ServerContext;
@@ -67,7 +49,20 @@ using grpc::ServerReader;
 using grpc::ServerReaderWriter;
 using grpc::ServerWriter;
 using grpc::Status;
+
 using namespace std;
+
+int clusterID;
+int serverID;
+string coordinatorIP;
+string coordinatorPort;
+string myPort;
+int masterID = -1;
+std::unique_ptr<CoordService::Stub> coord_stub_;
+bool isRegWithCoord = false;
+std::thread hb;
+
+void sendHeartBeat();
 
 struct Client
 {
@@ -334,7 +329,7 @@ class SNSServiceImpl final : public SNSService::Service
       }
       else
       {
-        //loop through the followers list to send messages and append to follower's timeline
+        // loop through the followers list to send messages and append to follower's timeline
         for (int i = 0; i < c->client_followers->size(); i++)
         {
           Client *cc = c->client_followers->at(i);
@@ -467,8 +462,60 @@ void RunServer(std::string port_no)
   std::unique_ptr<Server> server(builder.BuildAndStart());
   std::cout << "Server listening on " << server_address << std::endl;
   log(INFO, "Server listening on " + server_address);
-
   server->Wait();
+}
+
+void registerAsServer()
+{
+  // TODO: MP2.2
+  isRegWithCoord = true;
+}
+
+int registerAsMaster()
+{
+  log(INFO, "Trying to register as master...");
+  ClientContext context;
+  PathAndData request;
+  ReplyStatus response;
+  request.set_serverid(serverID);
+  request.set_clusterid(clusterID);
+  request.set_hostname("localhost"); // would be gotten from an environment variable
+  request.set_port(myPort);
+  request.set_path("/master");
+  Status status = coord_stub_->Create(&context, request, &response);
+  if (status.ok())
+  {
+    log(INFO, "Master is.." + response.status());
+    masterID = stoi(response.status());
+    cout << "master " << masterID << endl;
+    cout << "server " << serverID << endl;
+    if (masterID == serverID)
+    {
+      log(INFO, "I am the master..");
+    }
+  }
+  else
+  {
+    log(ERROR, "Coordinator error!");
+  }
+  return masterID;
+}
+
+void connectToCoordinator()
+{
+  std::shared_ptr<Channel> channel = grpc::CreateChannel(coordinatorIP + ":" + coordinatorPort, grpc::InsecureChannelCredentials());
+  coord_stub_ = CoordService::NewStub(channel);
+}
+
+void onStartUp()
+{
+  connectToCoordinator();
+  registerAsMaster();
+  registerAsServer();
+  if (masterID != -1 || isRegWithCoord)
+  {
+    hb = std::thread(sendHeartBeat);
+  }
 }
 
 int main(int argc, char **argv)
@@ -477,22 +524,74 @@ int main(int argc, char **argv)
   std::string port = "3010";
 
   int opt = 0;
-  while ((opt = getopt(argc, argv, "p:")) != -1)
+  int argslen = 0;
+  while ((opt = getopt(argc, argv, "p:c:s:h:k:")) != -1)
   {
     switch (opt)
     {
     case 'p':
       port = optarg;
+      myPort = port;
+      break;
+    case 'c':
+      clusterID = stoi(optarg);
+      argslen++;
+      break;
+    case 's':
+      // cout << optarg << endl;
+      serverID = stoi(optarg);
+      argslen++;
+      break;
+    case 'h':
+      coordinatorIP = optarg;
+      argslen++;
+      break;
+    case 'k':
+      coordinatorPort = optarg;
+      argslen++;
       break;
     default:
       std::cerr << "Invalid Command Line Argument\n";
     }
   }
+  if (argslen != 4)
+  {
+    std::cerr << "Arguments missing!\n";
+    exit(1);
+  }
 
   std::string log_file_name = std::string("server-") + port;
   google::InitGoogleLogging(log_file_name.c_str());
+  FLAGS_logtostderr = true;
+  FLAGS_alsologtostderr = true;
   log(INFO, "Logging Initialized. Server starting...");
+  onStartUp();
   RunServer(port);
-
+  hb.join();
   return 0;
+}
+
+void sendHeartBeat()
+{
+  while (true)
+  {
+    sleep(9);
+    ServerInfo request;
+    ClientContext context;
+    Confirmation response;
+    request.set_serverid(serverID);
+    request.set_clusterid(clusterID);
+    request.set_hostname("localhost"); // would be gotten from an environment variable
+    request.set_port(myPort);
+    Status status = coord_stub_->Heartbeat(&context, request, &response);
+    if (response.status())
+    {
+      log(INFO, "Heartbeat succeeded..");
+    }
+    else
+    {
+      log(INFO, "Heartbeat failed..");
+    }
+  }
+  return;
 }
