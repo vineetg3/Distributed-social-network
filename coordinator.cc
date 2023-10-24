@@ -55,17 +55,6 @@ struct zNode
   std::time_t last_heartbeat;
   bool missed_heartbeat;
   bool isActive();
-  // friend std::ostream &operator<<(std::ostream &os, const zNode &node)
-  // {
-  //   os << "Server ID: " << node.serverID << std::endl;
-  //   os << "Hostname: " << node.hostname << std::endl;
-  //   os << "Port: " << node.port << std::endl;
-  //   os << "Type: " << node.type << std::endl;
-  //   os << "Last Heartbeat: " << std::ctime(&node.last_heartbeat);
-  //   os << "Missed Heartbeat: " << (node.missed_heartbeat ? "Yes" : "No") << std::endl;
-  //   // os << "Is Active: " << (node.isActive() ? "Yes" : "No") << std::endl;
-  //   return os;
-  // }
 };
 
 // potentially thread safe
@@ -187,7 +176,7 @@ class CoordServiceImpl final : public CoordService::Service
   grpc::Status GetServer(ServerContext *context, const ID *id, ServerInfo *serverinfo) override
   {
     std::cout << "Got GetServer for clientID: " << id->id() << std::endl;
-    int clusterID = (id->id() % 3) + 1;
+    int clusterID = ((id->id()-1) % 3) + 1;
 
     // Your code here
     // If server is active, return serverinfo

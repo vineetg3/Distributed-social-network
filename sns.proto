@@ -41,7 +41,8 @@ service SNSService{
   rpc Follow (Request) returns (Reply) {}
   rpc UnFollow (Request) returns (Reply) {}
   // Bidirectional streaming RPC
-  rpc Timeline (stream Message) returns (stream Message) {} 
+  rpc Timeline (stream Message) returns (stream Message) {}
+  rpc CheckIfAlive(Request) returns (Reply) {}
 }
 
 message ListReply {

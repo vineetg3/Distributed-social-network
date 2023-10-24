@@ -51,6 +51,7 @@ using grpc::ServerWriter;
 using grpc::Status;
 
 using namespace std;
+namespace fs = std::filesystem;
 
 int clusterID;
 int serverID;
@@ -61,8 +62,12 @@ int masterID = -1;
 std::unique_ptr<CoordService::Stub> coord_stub_;
 bool isRegWithCoord = false;
 std::thread hb;
+string root_folder = "";
 
 void sendHeartBeat();
+bool createFolderIfNotExists(const std::string &folderPath);
+void listDirectoryContents(const std::string &directoryPath);
+void loadClientDB();
 
 struct Client
 {
@@ -273,10 +278,11 @@ class SNSServiceImpl final : public SNSService::Service
       reply->set_msg("FAILURE_NOT_EXISTS: User already exists.");
       return Status::OK;
     }
-    // Create timeline file. Place it in db folder with name username_tl.txt
-    const std::string folder_path = "db";
+    // Create required files.
+    const std::string folder_path = root_folder + "/" + name;
     mkdir(folder_path.c_str(), 0777);
-    create_or_check_file("tl", name);
+    create_or_check_file(folder_path, name, "tl");
+    create_or_check_file(folder_path, name, "follow");
 
     c->username = name;
     client_db.push_back(c);
@@ -284,19 +290,20 @@ class SNSServiceImpl final : public SNSService::Service
     return Status::OK;
   }
 
-  void create_or_check_file(std::string attr, std::string name)
+  void create_or_check_file(std::string rpath, std::string name, string attr)
   {
     // Open the file in append
-    std::ofstream outfile("db/" + name + "_" + attr + ".txt", std::ios::app);
+    string file_path = rpath + "/" + attr + ".txt";
+    std::ofstream outfile(file_path, std::ios::app);
     if (outfile.is_open())
     {
       // Close the file when done
       outfile.close();
-      std::cout << attr + " File created for " + name << std::endl;
+      std::cout << file_path + " File created for " + name << std::endl;
     }
     else
     {
-      std::cerr << attr + " Failed to open the file for " + name << std::endl;
+      std::cerr << file_path + " Failed to open the file for " + name << std::endl;
     }
   }
 
@@ -346,7 +353,7 @@ class SNSServiceImpl final : public SNSService::Service
                           std::string ppost)
   {
 
-    const std::string file_path = "db/" + username + "_tl.txt";
+    const std::string file_path = root_folder + "/" + username + "/tl.txt";
 
     // Open the file in input mode to read the existing content
     std::ifstream infile(file_path);
@@ -403,7 +410,7 @@ class SNSServiceImpl final : public SNSService::Service
   /// @return
   std::vector<std::vector<std::string>> get_last_20_messages(std::string username)
   {
-    std::string file_path = "db/" + username + "_tl.txt";
+    const std::string file_path = root_folder + "/" + username + "/tl.txt";
 
     // Open the file in input mode to read the existing content
     std::ifstream infile(file_path);
@@ -448,6 +455,12 @@ class SNSServiceImpl final : public SNSService::Service
       i += 3;
     }
     return messages;
+  }
+
+  Status CheckIfAlive(ServerContext *context, const Request *request, Reply *reply) override
+  {
+    reply->set_msg("Alive");
+    return Status::OK;
   }
 };
 
@@ -516,6 +529,8 @@ void onStartUp()
   {
     hb = std::thread(sendHeartBeat);
   }
+  root_folder = "server_" + to_string(clusterID) + "_" + to_string(serverID);
+  createFolderIfNotExists(root_folder);
 }
 
 int main(int argc, char **argv)
@@ -594,4 +609,68 @@ void sendHeartBeat()
     }
   }
   return;
+}
+
+void listDirectoryContents(const std::string &directoryPath)
+{
+  for (const auto &entry : fs::directory_iterator(directoryPath))
+  {
+    if (entry.is_directory())
+    {
+      std::cout << "Directory: " << entry.path().string() << std::endl;
+    }
+    else if (entry.is_regular_file())
+    {
+      std::cout << "File: " << entry.path().string() << std::endl;
+    }
+    else
+    {
+      std::cout << "Other: " << entry.path().string() << std::endl;
+    }
+  }
+}
+
+void loadClientDB()
+{
+  for (const auto &entry : fs::directory_iterator(root_folder))
+  {
+    if (entry.is_directory())
+    {
+      std::cout << "Directory: " << entry.path().filename() << std::endl;
+      Client *c = new Client;
+      c->username = entry.path().filename();
+      client_db.push_back(c);
+    }
+    else if (entry.is_regular_file())
+    {
+      std::cout << "File: " << entry.path().string() << std::endl;
+    }
+    else
+    {
+      std::cout << "Other: " << entry.path().string() << std::endl;
+    }
+  }
+}
+
+bool createFolderIfNotExists(const std::string &folderPath)
+{
+  if (!fs::exists(folderPath))
+  {
+    try
+    {
+      fs::create_directory(folderPath);
+      std::cout << "Folder created: " << folderPath << std::endl;
+      return true; // Folder was created
+    }
+    catch (const std::filesystem::filesystem_error &e)
+    {
+      std::cerr << "Error creating folder: " << e.what() << std::endl;
+      return false; // Error occurred while creating the folder
+    }
+  }
+  else
+  {
+    std::cout << "Folder already exists: " << folderPath << std::endl;
+    return true; // Folder already exists
+  }
 }

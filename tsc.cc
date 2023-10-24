@@ -107,6 +107,7 @@ protected:
   virtual int connectTo();
   virtual IReply processCommand(std::string &input);
   virtual void processTimeline();
+  virtual Status isServerAvailable();
 
 private:
   std::string hostname;
@@ -145,7 +146,14 @@ int Client::connectTo()
   }
   return 1;
 }
-
+Status Client::isServerAvailable()
+{
+  Request request;
+  ClientContext context;
+  Reply reply;
+  Status status = stub_->CheckIfAlive(&context, request, &reply);
+  return status;
+}
 IReply Client::processCommand(std::string &input)
 {
   // ------------------------------------------------------------
@@ -191,7 +199,14 @@ IReply Client::processCommand(std::string &input)
   // For the command "LIST", you should set both "all_users" and
   // "following_users" member variable of IReply.
   // ------------------------------------------------------------
-
+  Status statusCheck = isServerAvailable();
+  if (!statusCheck.ok())
+  {
+    IReply ireCheck;
+    ireCheck.grpc_status = statusCheck;
+    cout << "COMMAND FAILED" << endl;
+    return ireCheck;
+  }
   IReply ire;
 
   // parse the input command
@@ -427,6 +442,7 @@ void getServerDetails()
   ClientContext context;
   ID request;
   ServerInfo response;
+  request.set_id(stoi(username));
   Status status = coord_stub_->GetServer(&context, request, &response);
   serverIP = response.hostname();
   serverPort = response.port();
