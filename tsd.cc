@@ -262,6 +262,7 @@ class SNSServiceImpl final : public SNSService::Service
   // RPC Login
   Status Login(ServerContext *context, const Request *request, Reply *reply) override
   {
+    cout << "LOGIN FUNC" << endl;
     Client *c;
     string name = request->username();
     c = getUser(name);
@@ -271,22 +272,29 @@ class SNSServiceImpl final : public SNSService::Service
       c = new Client;
       c->client_followers = new std::vector<Client *>();
       c->client_following = new std::vector<Client *>();
+      c->connected = true;
+      // Create required files.
+      const std::string folder_path = root_folder + "/" + name;
+      createFolderIfNotExists(folder_path);
+      create_or_check_file(folder_path, name, "tl");
+      create_or_check_file(folder_path, name, "follow");
+      c->username = name;
+      client_db.push_back(c);
+      cout << "User " + name + " is connected." << endl;
     }
-    else
+    else if (c->connected == true) // TODO MP2.2 Make connected as true before each other function call??
     {
       // client exists so set error message and return
+      cout << "CLIENT EXISTS!.." << endl;
       reply->set_msg("FAILURE_NOT_EXISTS: User already exists.");
-      return Status::OK;
     }
-    // Create required files.
-    const std::string folder_path = root_folder + "/" + name;
-    mkdir(folder_path.c_str(), 0777);
-    create_or_check_file(folder_path, name, "tl");
-    create_or_check_file(folder_path, name, "follow");
-
-    c->username = name;
-    client_db.push_back(c);
-    cout << "User " + name + " is connected." << endl;
+    else if (c->connected == false)
+    {
+      // This case is when, server picks up client from filesystem, but client hasnt connected yet.
+      // So now we connect the client to server and make the client live.
+      cout << "MAKING THE CLIENT CONNECTED.." << endl;
+      c->connected = true;
+    }
     return Status::OK;
   }
 
@@ -340,7 +348,7 @@ class SNSServiceImpl final : public SNSService::Service
         for (int i = 0; i < c->client_followers->size(); i++)
         {
           Client *cc = c->client_followers->at(i);
-          append_to_timeline(c->client_followers->at(i)->username, m.username(), m.timestamp(), m.msg());
+          // append_to_timeline(c->client_followers->at(i)->username, m.username(), m.timestamp(), m.msg());
           if (cc->stream != nullptr)
             cc->stream->Write(m);
         }
@@ -473,7 +481,7 @@ void RunServer(std::string port_no)
   builder.AddListeningPort(server_address, grpc::InsecureServerCredentials());
   builder.RegisterService(&service);
   std::unique_ptr<Server> server(builder.BuildAndStart());
-  std::cout << "Server listening on " << server_address << std::endl;
+  // std::cout << "Server listening on " << server_address << std::endl;
   log(INFO, "Server listening on " + server_address);
   server->Wait();
 }
@@ -500,8 +508,8 @@ int registerAsMaster()
   {
     log(INFO, "Master is.." + response.status());
     masterID = stoi(response.status());
-    cout << "master " << masterID << endl;
-    cout << "server " << serverID << endl;
+    // cout << "master " << masterID << endl;
+    // cout << "server " << serverID << endl;
     if (masterID == serverID)
     {
       log(INFO, "I am the master..");
@@ -531,6 +539,7 @@ void onStartUp()
   }
   root_folder = "server_" + to_string(clusterID) + "_" + to_string(serverID);
   createFolderIfNotExists(root_folder);
+  loadClientDB();
 }
 
 int main(int argc, char **argv)
@@ -577,8 +586,8 @@ int main(int argc, char **argv)
 
   std::string log_file_name = std::string("server-") + port;
   google::InitGoogleLogging(log_file_name.c_str());
-  FLAGS_logtostderr = true;
-  FLAGS_alsologtostderr = true;
+  // FLAGS_logtostderr = true;
+  // FLAGS_alsologtostderr = true;
   log(INFO, "Logging Initialized. Server starting...");
   onStartUp();
   RunServer(port);
@@ -590,10 +599,11 @@ void sendHeartBeat()
 {
   while (true)
   {
-    sleep(9);
+    sleep(5);
     ServerInfo request;
     ClientContext context;
     Confirmation response;
+    // cout << serverID << endl;
     request.set_serverid(serverID);
     request.set_clusterid(clusterID);
     request.set_hostname("localhost"); // would be gotten from an environment variable
@@ -636,9 +646,12 @@ void loadClientDB()
   {
     if (entry.is_directory())
     {
-      std::cout << "Directory: " << entry.path().filename() << std::endl;
+      std::cout << "Directory: " << entry.path().filename().string() << std::endl;
       Client *c = new Client;
-      c->username = entry.path().filename();
+      c->client_followers = new std::vector<Client *>();
+      c->client_following = new std::vector<Client *>();
+      c->username = entry.path().filename().string();
+      c->connected = false;
       client_db.push_back(c);
     }
     else if (entry.is_regular_file())

@@ -71,6 +71,7 @@ int findServer(std::vector<zNode *> v, int id);
 std::time_t getTimeNow();
 void checkHeartbeat();
 string znodeToString(zNode *z);
+bool eitherCreateOrHB = true;
 
 std::vector<zNode *> &getCluster(int idx)
 {
@@ -153,7 +154,7 @@ class CoordServiceImpl final : public CoordService::Service
 
   grpc::Status Heartbeat(ServerContext *context, const ServerInfo *serverinfo, Confirmation *confirmation) override
   {
-    // std::cout<<"Got Heartbeat! "<<serverinfo->type()<<"("<<serverinfo->serverid()<<")"<<std::endl;
+    std::cout << "Got Heartbeat! " << serverinfo->type() << "(" << serverinfo->serverid() << ")" << std::endl;
 
     // Your code here
     // Heartbeat only happens after create path. So path is guarenteed to be present.
@@ -176,7 +177,7 @@ class CoordServiceImpl final : public CoordService::Service
   grpc::Status GetServer(ServerContext *context, const ID *id, ServerInfo *serverinfo) override
   {
     std::cout << "Got GetServer for clientID: " << id->id() << std::endl;
-    int clusterID = ((id->id()-1) % 3) + 1;
+    int clusterID = ((id->id() - 1) % 3) + 1;
 
     // Your code here
     // If server is active, return serverinfo
@@ -205,6 +206,7 @@ class CoordServiceImpl final : public CoordService::Service
 
   grpc::Status Create(ServerContext *context, const PathAndData *pdata, ReplyStatus *status) override
   {
+    v_mutex.lock();
     zNode *newZNode = new zNode;
     newZNode->serverID = pdata->serverid();
     newZNode->hostname = pdata->hostname();
@@ -213,7 +215,7 @@ class CoordServiceImpl final : public CoordService::Service
     newZNode->last_heartbeat = getTimeNow();
     if (pdata->path() == "/master")
     {
-      cout << "Creating Master Path for: server id,cluster id " << pdata->serverid() << " " << pdata->clusterid() << endl;
+      // cout << "Creating Master Path for: server id,cluster id " << pdata->serverid() << " " << pdata->clusterid() << endl;
       // current server is contending for master
 
       unordered_map<string, int> &path = getPath(pdata->clusterid());
@@ -228,6 +230,8 @@ class CoordServiceImpl final : public CoordService::Service
         {
           // the current Create request for master failed
           status->set_status(to_string(cluster[path[master_path]]->serverID));
+          cout << "Master is already active . Master is: " << to_string(cluster[path[master_path]]->serverID) << endl;
+          v_mutex.unlock();
           return grpc::Status::OK;
         }
       }
@@ -260,6 +264,7 @@ class CoordServiceImpl final : public CoordService::Service
       // 2. if it doesn't , create new path and point to vector idx
       // /servers/<server-IDX>
     }
+    v_mutex.unlock();
     return grpc::Status::OK;
   }
 
@@ -357,6 +362,7 @@ void checkHeartbeat()
     // check servers for heartbeat > 10
     // if true turn missed heartbeat = true
     //  Your code below
+    v_mutex.lock();
     for (int i = 1; i <= 3; i++)
     {
       std::vector<zNode *> &cluster = getCluster(i);
@@ -388,6 +394,7 @@ void checkHeartbeat()
         }
       }
     }
+    v_mutex.unlock();
 
     sleep(3);
   }

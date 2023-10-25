@@ -44,6 +44,8 @@ string serverIP;
 string serverPort;
 std::unique_ptr<CoordService::Stub> coord_stub_;
 std::string username;
+bool isPrevRPCFailed = false;
+std::shared_ptr<Channel> channelForServer;
 
 void sig_ignore(int sig)
 {
@@ -137,8 +139,8 @@ int Client::connectTo()
   // to call any service methods in those functions.
   // Please refer to gRpc tutorial how to create a stub.
   // ------------------------------------------------------------
-  std::shared_ptr<Channel> channel = grpc::CreateChannel(hostname + ":" + port, grpc::InsecureChannelCredentials());
-  stub_ = SNSService::NewStub(channel);
+  std::shared_ptr<Channel> channelForServer = grpc::CreateChannel(hostname + ":" + port, grpc::InsecureChannelCredentials());
+  stub_ = SNSService::NewStub(channelForServer);
   IReply ire = Client::Login();
   if (ire.comm_status != IStatus::SUCCESS)
   {
@@ -146,14 +148,22 @@ int Client::connectTo()
   }
   return 1;
 }
+
 Status Client::isServerAvailable()
 {
   Request request;
   ClientContext context;
   Reply reply;
+  if (isPrevRPCFailed)
+  {
+    channelForServer.reset();
+    channelForServer = grpc::CreateChannel(hostname + ":" + port, grpc::InsecureChannelCredentials());
+    stub_ = SNSService::NewStub(channelForServer);
+  }
   Status status = stub_->CheckIfAlive(&context, request, &reply);
   return status;
 }
+
 IReply Client::processCommand(std::string &input)
 {
   // ------------------------------------------------------------
@@ -202,10 +212,15 @@ IReply Client::processCommand(std::string &input)
   Status statusCheck = isServerAvailable();
   if (!statusCheck.ok())
   {
+    isPrevRPCFailed = true;
     IReply ireCheck;
     ireCheck.grpc_status = statusCheck;
     cout << "COMMAND FAILED" << endl;
     return ireCheck;
+  }
+  else
+  {
+    isPrevRPCFailed = false;
   }
   IReply ire;
 
