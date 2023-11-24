@@ -29,6 +29,7 @@ using csce438::Path;
 using csce438::PathAndData;
 using csce438::ReplyStatus;
 using csce438::ServerInfo;
+using csce438::ServerList;
 using google::protobuf::Duration;
 using google::protobuf::Timestamp;
 using grpc::Server;
@@ -62,6 +63,7 @@ std::mutex v_mutex;
 std::vector<zNode *> cluster1;
 std::vector<zNode *> cluster2;
 std::vector<zNode *> cluster3;
+std::vector<zNode *> sync_servers(4,NULL);
 std::unordered_map<std::string, int> paths1; // for cluster 1
 std::unordered_map<std::string, int> paths2; // for cluster 2
 std::unordered_map<std::string, int> paths3; // for cluster 3
@@ -302,6 +304,35 @@ class CoordServiceImpl final : public CoordService::Service
     }
     return grpc::Status::OK;
   }
+ 
+  grpc::Status RegFS(ServerContext *context, const ServerInfo *server_info, Confirmation *status) override
+  {
+    zNode* newZNode = new zNode;
+    newZNode->hostname = server_info->hostname();
+    newZNode->port = server_info->port();
+    newZNode->missed_heartbeat = false;
+    newZNode->last_heartbeat = getTimeNow();
+    sync_servers[server_info->clusterid()] = newZNode;
+    status->set_status("success");
+    log(INFO, "Registered sync server "<< newZNode->port << " "<<server_info->clusterid());
+    return grpc::Status::OK;
+  }
+
+  grpc::Status GetFS(ServerContext *context, const ID *id, ServerList *list) override
+  {
+    for(int i=1;i<=3;i++){
+      if(sync_servers[i]==NULL){
+        cout<<"Sync server "<<i<<" is null."<<endl;
+        continue;
+      }
+      ServerInfo* si = list->add_servers();
+      si->set_hostname(sync_servers[i]->hostname);
+      si->set_port(sync_servers[i]->port);
+      si->set_clusterid(i);
+    }
+    return grpc::Status::OK;
+  }
+
 };
 
 void RunServer(std::string port_no)

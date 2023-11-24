@@ -11,6 +11,8 @@ import "google/protobuf/timestamp.proto";
 service CoordService{
   rpc Heartbeat (ServerInfo) returns (Confirmation) {}
   rpc GetServer (ID) returns (ServerInfo) {}
+  rpc RegFS (ServerInfo) returns (Confirmation) {}
+  rpc GetFS (ID) returns (ServerList) {}
   // ZooKeeper API here
   rpc Create (PathAndData) returns (ReplyStatus){}
   rpc Exists (Path) returns (ReplyStatus) {}
@@ -52,6 +54,10 @@ message Path{
   int32 serverID = 1;
   int32 clusterID = 2;
   string path = 3;
+}
+
+message ServerList{
+  repeated ServerInfo servers = 1;
 }
 
 

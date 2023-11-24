@@ -1,0 +1,23 @@
+syntax = "proto3";
+package csce438;
+import "google/protobuf/timestamp.proto";
+
+
+// ------------------------------------------------------------
+// The coordinator service definition
+// These are the different functionalities exposed by service
+// ------------------------------------------------------------
+
+//Init and Heartbeat potentially redundant
+service SynchService{
+  rpc GetManagedUsers (Msg) returns (AllUsers) {}
+}
+
+message AllUsers{
+  repeated string users = 1;
+}
+
+message Msg{
+  string data = 1;
+}
+
