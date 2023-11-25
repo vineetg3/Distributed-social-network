@@ -32,10 +32,12 @@ using csce438::Confirmation;
 using csce438::Msg;
 
 using csce438::CoordService;
+using csce438::FlwRel;
 using csce438::ID;
 using csce438::ServerInfo;
 using csce438::ServerList;
 using csce438::SynchService;
+
 // using csce438::TLFL;
 using google::protobuf::Duration;
 using google::protobuf::Timestamp;
@@ -64,19 +66,24 @@ struct zNode
 int synchID = 1;
 std::vector<std::string> get_lines_from_file(std::string);
 void run_synchronizer(std::string, std::string, std::string, int);
-std::vector<std::string> get_all_users_func(int);
+std::vector<std::string> get_all_managed_users_func(int);
 std::vector<std::string> get_tl_or_fl(int, int, bool);
 std::vector<std::string> getMatchingFilePaths(int, string);
 std::vector<std::string> getSortedUniqueStrings(const std::vector<std::string> &inputVector);
 int sync_global_users(std::vector<zNode *> &sync_servers, vector<std::unique_ptr<SynchService::Stub>> &fs_stubs, int syncId);
 void overwriteToFile(const std::string &relativeFilePath, const std::vector<std::string> &data);
+set<string> get_all_follow_relations();
+int sync_follow(std::vector<zNode *> &sync_servers, vector<std::unique_ptr<SynchService::Stub>> &fs_stubs, int syncId);
+map<string, set<string>> generateFlwMp(vector<string> &flwrels);
+std::vector<std::string> splitString(const std::string &input, char delimiter);
+std::string removeFileName(const std::string &input);
 
 class SynchServiceImpl final : public SynchService::Service
 {
     Status GetManagedUsers(ServerContext *context, const Msg *msg, AllUsers *allusers) override
     {
-        std::cout << "Got GetManagedUsers" << std::endl;
-        std::vector<std::string> list = get_all_users_func(synchID);
+        std::cout << "Got GetManagedUsersfrom: " << msg->data() << std::endl;
+        std::vector<std::string> list = get_all_managed_users_func(synchID);
         // package list
         for (auto s : list)
         {
@@ -84,6 +91,18 @@ class SynchServiceImpl final : public SynchService::Service
         }
 
         // return list
+        return Status::OK;
+    }
+
+    Status GetFL(ServerContext *context, const Msg *msg, FlwRel *flwrels) override
+    {
+        std::cout << "Got GetFL from: " << msg->data() << std::endl;
+        set<string> rels = get_all_follow_relations();
+        for (string s : rels)
+        {
+            flwrels->add_rel(s);
+        }
+
         return Status::OK;
     }
 
@@ -169,6 +188,7 @@ int main(int argc, char **argv)
             break;
         case 'i':
             synchID = std::stoi(optarg);
+            cout << "I am part of cluster: " << synchID << endl;
             break;
         default:
             std::cerr << "Invalid Command Line Argument\n";
@@ -210,7 +230,7 @@ void run_synchronizer(std::string coordIP, std::string coordPort, std::string po
     while (true)
     {
         // change this to 30 eventually
-        sleep(10);
+        sleep(4);
         // Get other FS servers
         std::vector<zNode *> sync_servers;
         vector<std::unique_ptr<SynchService::Stub>> fs_stubs;
@@ -231,6 +251,7 @@ void run_synchronizer(std::string coordIP, std::string coordPort, std::string po
             // fs_stubs[server_info.clusterid()] = std::unique_ptr<SynchService::Stub>(SynchService::NewStub(grpc::CreateChannel(target_str, grpc::InsecureChannelCredentials())));
             fs_stubs.push_back(unique_ptr<SynchService::Stub>(SynchService::NewStub(grpc::CreateChannel(target_str, grpc::InsecureChannelCredentials()))));
         }
+
         log(INFO, "**** Beginning global users sync *****");
         int global_users_sync_result = sync_global_users(sync_servers, fs_stubs, synchID);
         if (global_users_sync_result == 0)
@@ -244,11 +265,16 @@ void run_synchronizer(std::string coordIP, std::string coordPort, std::string po
         log(INFO, "**** End global users sync *****");
 
         log(INFO, "**** Beginning Follower sync *****");
-
-        
-
+        int followers_sync_result = sync_follow(sync_servers, fs_stubs, synchID);
+        if (followers_sync_result == 0)
+        {
+            log(INFO, "FOLLOW SYNC Failed.");
+        }
+        else
+        {
+            log(INFO, "FOLLOW SYNC Completed.");
+        }
         log(INFO, "**** End Follower sync *****");
-
 
         //         //1. synch all users file
         //             //get list of all followers
@@ -282,8 +308,78 @@ void run_synchronizer(std::string coordIP, std::string coordPort, std::string po
         //                     }
         //                 }
         //             }
+        cout << endl
+             << endl;
     }
     //     return;
+}
+//////*********  SYNC FOLLOW RELATIONS **********/////////
+
+int sync_follow(std::vector<zNode *> &sync_servers, vector<std::unique_ptr<SynchService::Stub>> &fs_stubs, int syncId)
+{
+    // receive all follow rels. Unique the list.
+    //  create hashmap
+    //  Get Managed users, for each managed user, get contents from followers file, union it with hashmap
+    //  and overwrite to file.
+    vector<string> all_rels;
+    for (auto &stub_ : fs_stubs)
+    {
+        ClientContext cc;
+        Msg msg;
+        msg.set_data(to_string(syncId));
+        grpc::Status status;
+        FlwRel flwrel;
+        status = stub_->GetFL(&cc, msg, &flwrel);
+        if (!status.ok())
+            return 0;
+        for (const string &str : flwrel.rel())
+        {
+            all_rels.push_back(str);
+        }
+    }
+    vector<string> uniq_rels = getSortedUniqueStrings(all_rels);
+    map<string, set<string>> userFlwMp = generateFlwMp(uniq_rels);
+    std::vector<std::string> managed_users = get_all_managed_users_func(syncId);
+    vector<string> server_paths = getMatchingFilePaths(syncId, "");
+
+    // foreach managed user, get followers info present in slave and master
+    //  combine and unique all of followers, and keep it back.
+    for (string muser : managed_users)
+    {
+        vector<string> all_flwrs;
+        for (string spath : server_paths)
+        {
+            string filename = spath + "/" + muser + "/followers.txt";
+            vector<string> cur_all_flwrs = get_lines_from_file(filename);
+            all_flwrs.insert(all_flwrs.end(), cur_all_flwrs.begin(), cur_all_flwrs.end());
+        }
+        userFlwMp[muser].insert(all_flwrs.begin(), all_flwrs.end());
+        for (string spath : server_paths)
+        {
+            string filename = spath + "/" + muser + "/followers.txt";
+            overwriteToFile(filename, std::vector<string>(userFlwMp[muser].begin(), userFlwMp[muser].end()));
+        }
+    }
+    return 1;
+}
+
+set<string> get_all_follow_relations()
+{
+    // returns all the following relations u1 u2 , u1 follows u2. from both servers in cluster.
+    //  "u1 u2" unique strings are returned.
+    vector<string> fps = getMatchingFilePaths(synchID, "/follow_relations.txt");
+    set<string> rels;
+    for (string &fp : fps)
+    {
+        vector<string> lines = get_lines_from_file(fp);
+        rels.insert(lines.begin(), lines.end());
+    }
+    cout << "Follow relations: " << endl;
+    for (string line : rels)
+    {
+        cout << line << endl;
+    }
+    return rels;
 }
 
 //////*********  SYNC MANAGED USERS **********/////////
@@ -343,6 +439,14 @@ std::vector<std::string> get_lines_from_file(std::string filename)
     std::string user;
     std::ifstream file;
     file.open(filename);
+
+    // Check if the file exists and can be opened
+    if (!file.is_open())
+    {
+        std::cerr << "File does not exist while trying to get lines: " << filename << ". skipping.." << std::endl;
+        return {}; // Return an empty vector
+    }
+    cout << "Lines from file: " << filename << endl;
     if (file.peek() == std::ifstream::traits_type::eof())
     {
         // return empty vector if empty file
@@ -353,9 +457,11 @@ std::vector<std::string> get_lines_from_file(std::string filename)
     while (file)
     {
         getline(file, user);
-
         if (!user.empty())
+        {
             users.push_back(user);
+            cout << user << endl;
+        }
     }
 
     file.close();
@@ -370,6 +476,9 @@ std::vector<std::string> get_lines_from_file(std::string filename)
 
 void overwriteToFile(const std::string &relativeFilePath, const std::vector<std::string> &data)
 {
+    // create intermediate directories if not existing
+    std::filesystem::create_directories(removeFileName(relativeFilePath));
+
     // Open the file for writing
     std::ofstream outputFile(relativeFilePath);
 
@@ -378,10 +487,11 @@ void overwriteToFile(const std::string &relativeFilePath, const std::vector<std:
         std::cerr << "Error: Unable to open file for writing." << std::endl;
         return;
     }
-
+    cout << "Writing to file: " << relativeFilePath << endl;
     // Write each string from the vector to the file
     for (const std::string &line : data)
     {
+        cout << line << endl;
         outputFile << line << std::endl;
     }
 
@@ -389,6 +499,20 @@ void overwriteToFile(const std::string &relativeFilePath, const std::vector<std:
     outputFile.close();
 
     std::cout << "Data has been written to the file: " << relativeFilePath << std::endl;
+}
+
+std::string removeFileName(const std::string &input)
+{
+    std::string cleanedPath = (input.substr(0, 2) == "./") ? input.substr(2) : input;
+    size_t lastSlashPos = cleanedPath.find_last_of('/');
+
+    if (lastSlashPos == std::string::npos)
+    {
+        // No forward slash found, return the original string
+        return input;
+    }
+
+    return "./" + cleanedPath.substr(0, lastSlashPos); // Include the last slash in the result
 }
 
 std::vector<std::string> getMatchingFilePaths(int syncID, string suffixPath)
@@ -445,7 +569,7 @@ bool file_contains_user(std::string filename, std::string user)
     return false;
 }
 
-std::vector<std::string> get_all_users_func(int synchID)
+std::vector<std::string> get_all_managed_users_func(int synchID)
 {
 
     vector<string> fps = getMatchingFilePaths(synchID, "/managed_users.txt");
@@ -458,6 +582,32 @@ std::vector<std::string> get_all_users_func(int synchID)
     }
     std::vector<std::string> users(stringSet.begin(), stringSet.end());
     return users;
+}
+
+map<string, set<string>> generateFlwMp(vector<string> &flwrels)
+{
+    map<string, set<string>> mp;
+
+    for (string str : flwrels)
+    {
+        vector<string> rel = splitString(str, ' ');
+        mp[rel[1]].insert(rel[0]);
+    }
+    return mp;
+}
+
+std::vector<std::string> splitString(const std::string &input, char delimiter)
+{
+    std::vector<std::string> tokens;
+    std::istringstream tokenStream(input);
+    std::string token;
+
+    while (std::getline(tokenStream, token, delimiter))
+    {
+        tokens.push_back(token);
+    }
+
+    return tokens;
 }
 
 // std::vector<std::string> get_tl_or_fl(int synchID, int clientID, bool tl){

@@ -4,14 +4,14 @@ import "google/protobuf/timestamp.proto";
 
 
 // ------------------------------------------------------------
-// The coordinator service definition
+// The synchronizer service definition
 // These are the different functionalities exposed by service
 // ------------------------------------------------------------
 
 //Init and Heartbeat potentially redundant
 service SynchService{
   rpc GetManagedUsers (Msg) returns (AllUsers) {}
-  rpc GetFL (Msg) return (FlwRel)
+  rpc GetFL (Msg) returns (FlwRel) {}
 }
 
 message AllUsers{
