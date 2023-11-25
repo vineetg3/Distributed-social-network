@@ -19,6 +19,8 @@
 #include <google/protobuf/util/time_util.h>
 #include <grpc++/grpc++.h>
 #include <regex>
+#include <glog/logging.h>     // for LOG
+#include <glog/raw_logging.h> // for RAW_LOG
 
 #include "synchronizer.grpc.pb.h"
 #include "coordinator.grpc.pb.h"
@@ -37,22 +39,19 @@ using csce438::SynchService;
 // using csce438::TLFL;
 using google::protobuf::Duration;
 using google::protobuf::Timestamp;
+using grpc::ClientContext;
 using grpc::Server;
 using grpc::ServerBuilder;
 using grpc::ServerContext;
-using grpc::ClientContext;
 using grpc::ServerReader;
 using grpc::ServerReaderWriter;
 using grpc::ServerWriter;
 using grpc::Status;
 using namespace std;
 
-int synchID = 1;
-std::vector<std::string> get_lines_from_file(std::string);
-void run_synchronizer(std::string, std::string, std::string, int);
-std::vector<std::string> get_all_users_func(int);
-std::vector<std::string> get_tl_or_fl(int, int, bool);
-std::vector<std::string> getMatchingDirectories(const std::string &baseDirectory, const std::string &regexPattern);
+#define log(severity, msg) \
+    LOG(severity) << msg;  \
+    google::FlushLogFiles(google::severity);
 
 struct zNode
 {
@@ -62,12 +61,22 @@ struct zNode
     std::string type;
 };
 
+int synchID = 1;
+std::vector<std::string> get_lines_from_file(std::string);
+void run_synchronizer(std::string, std::string, std::string, int);
+std::vector<std::string> get_all_users_func(int);
+std::vector<std::string> get_tl_or_fl(int, int, bool);
+std::vector<std::string> getMatchingFilePaths(int, string);
+std::vector<std::string> getSortedUniqueStrings(const std::vector<std::string> &inputVector);
+int sync_global_users(std::vector<zNode *> &sync_servers, vector<std::unique_ptr<SynchService::Stub>> &fs_stubs, int syncId);
+void overwriteToFile(const std::string &relativeFilePath, const std::vector<std::string> &data);
+
 class SynchServiceImpl final : public SynchService::Service
 {
     Status GetManagedUsers(ServerContext *context, const Msg *msg, AllUsers *allusers) override
     {
-        // std::cout<<"Got GetAllUsers"<<std::endl;
-        std::vector<std::string> list = get_all_users_func(stoi(msg->data()));
+        std::cout << "Got GetManagedUsers" << std::endl;
+        std::vector<std::string> list = get_all_users_func(synchID);
         // package list
         for (auto s : list)
         {
@@ -165,6 +174,10 @@ int main(int argc, char **argv)
             std::cerr << "Invalid Command Line Argument\n";
         }
     }
+    std::string log_file_name = std::string("synchronizer");
+    google::InitGoogleLogging(log_file_name.c_str());
+    FLAGS_logtostderr = true;
+    FLAGS_alsologtostderr = true;
     RunServer(coordIP, coordPort, port, synchID);
     return 0;
 }
@@ -200,7 +213,7 @@ void run_synchronizer(std::string coordIP, std::string coordPort, std::string po
         sleep(10);
         // Get other FS servers
         std::vector<zNode *> sync_servers;
-        vector<std::unique_ptr<SynchService::Stub>> fs_stubs(4,NULL);
+        vector<std::unique_ptr<SynchService::Stub>> fs_stubs;
         grpc::ClientContext context;
         ID id;
         ServerList serverlist;
@@ -215,9 +228,26 @@ void run_synchronizer(std::string coordIP, std::string coordPort, std::string po
             sync_servers.push_back(newZNode);
             cout << "Sync server details: " << newZNode->port << " " << newZNode->clusterID << endl;
             string target_str = server_info.hostname() + ":" + server_info.port();
-            fs_stubs[server_info.clusterid()] = std::unique_ptr<SynchService::Stub>(SynchService::NewStub(grpc::CreateChannel(target_str, grpc::InsecureChannelCredentials())));
-
+            // fs_stubs[server_info.clusterid()] = std::unique_ptr<SynchService::Stub>(SynchService::NewStub(grpc::CreateChannel(target_str, grpc::InsecureChannelCredentials())));
+            fs_stubs.push_back(unique_ptr<SynchService::Stub>(SynchService::NewStub(grpc::CreateChannel(target_str, grpc::InsecureChannelCredentials()))));
         }
+        log(INFO, "**** Beginning global users sync *****");
+        int global_users_sync_result = sync_global_users(sync_servers, fs_stubs, synchID);
+        if (global_users_sync_result == 0)
+        {
+            log(INFO, "GLOBAL USER SYNC Failed.");
+        }
+        else
+        {
+            log(INFO, "GLOBAL USER SYNC Completed.");
+        }
+        log(INFO, "**** End global users sync *****");
+
+        log(INFO, "**** Beginning Follower sync *****");
+
+        
+
+        log(INFO, "**** End Follower sync *****");
 
 
         //         //1. synch all users file
@@ -256,15 +286,56 @@ void run_synchronizer(std::string coordIP, std::string coordPort, std::string po
     //     return;
 }
 
+//////*********  SYNC MANAGED USERS **********/////////
 
-void sync_global_users(std::vector<zNode *>& sync_servers,vector<std::unique_ptr<SynchService::Stub>>& fs_stubs, int syncId){
+int sync_global_users(std::vector<zNode *> &sync_servers, vector<std::unique_ptr<SynchService::Stub>> &fs_stubs, int syncId)
+{
     vector<string> received_users;
-    for(auto& stub_: fs_stubs){
-        ClientCont
-        stub_->
+    for (auto &stub_ : fs_stubs)
+    {
+        ClientContext cc;
+        Msg msg;
+        msg.set_data(to_string(syncId));
+        grpc::Status status;
+        AllUsers all_users;
+        status = stub_->GetManagedUsers(&cc, msg, &all_users);
+        if (!status.ok())
+            return 0;
+        for (const std::string &str : all_users.users())
+        {
+            received_users.push_back(str);
+        }
     }
+    cout << "Received users" << endl;
+    for (auto str : received_users)
+    {
+        cout << str << endl;
+    }
+    vector<string> unique_users = getSortedUniqueStrings(received_users);
+    vector<string> fps = getMatchingFilePaths(syncId, "/global_users.txt");
+    for (string &fp : fps)
+    {
+        cout << "over write to file: " << fp << endl;
+        overwriteToFile(fp, unique_users);
+    }
+    return 1;
 }
 
+std::vector<std::string> getSortedUniqueStrings(const std::vector<std::string> &inputVector)
+{
+    // Create a copy of the input vector
+    std::vector<std::string> uniqueStrings = inputVector;
+
+    // Sort the vector
+    std::sort(uniqueStrings.begin(), uniqueStrings.end());
+
+    // Remove duplicates using std::unique idiom
+    uniqueStrings.erase(std::unique(uniqueStrings.begin(), uniqueStrings.end()), uniqueStrings.end());
+
+    return uniqueStrings;
+}
+
+//////*********  COMMON FUNCTIONS **********/////////
 
 std::vector<std::string> get_lines_from_file(std::string filename)
 {
@@ -297,6 +368,65 @@ std::vector<std::string> get_lines_from_file(std::string filename)
     return users;
 }
 
+void overwriteToFile(const std::string &relativeFilePath, const std::vector<std::string> &data)
+{
+    // Open the file for writing
+    std::ofstream outputFile(relativeFilePath);
+
+    if (!outputFile.is_open())
+    {
+        std::cerr << "Error: Unable to open file for writing." << std::endl;
+        return;
+    }
+
+    // Write each string from the vector to the file
+    for (const std::string &line : data)
+    {
+        outputFile << line << std::endl;
+    }
+
+    // Close the file
+    outputFile.close();
+
+    std::cout << "Data has been written to the file: " << relativeFilePath << std::endl;
+}
+
+std::vector<std::string> getMatchingFilePaths(int syncID, string suffixPath)
+{
+    // returns
+    //     ./server_1_123
+    //     ./server_1_456
+    const std::string &regexPattern = "server_" + to_string(syncID) + "_[0-9]+";
+    const std::string baseDirectory = fs::current_path().string();
+    const std::regex pattern(regexPattern);
+
+    std::vector<std::string> matchingDirectories;
+
+    try
+    {
+        for (const auto &entry : fs::directory_iterator(baseDirectory))
+        {
+            if (fs::is_directory(entry) && std::regex_match(entry.path().filename().string(), pattern))
+            {
+                matchingDirectories.push_back(fs::relative(entry.path(), baseDirectory).string());
+            }
+        }
+    }
+    catch (const std::exception &e)
+    {
+        std::cerr << "Error: " << e.what() << std::endl;
+    }
+
+    for (auto &dir : matchingDirectories)
+    {
+        dir += suffixPath;
+    }
+
+    return matchingDirectories;
+}
+
+//////*********  END **********/////////
+
 bool file_contains_user(std::string filename, std::string user)
 {
     std::vector<std::string> users;
@@ -317,51 +447,17 @@ bool file_contains_user(std::string filename, std::string user)
 
 std::vector<std::string> get_all_users_func(int synchID)
 {
-    const std::string baseDirectory = fs::current_path().string();
 
-    vector<string> dirs = getMatchingDirectories(baseDirectory, "server_" + to_string(synchID) + "_[0-9]+");
+    vector<string> fps = getMatchingFilePaths(synchID, "/managed_users.txt");
 
-    for (auto &dir : dirs)
-    {
-        dir += "/managed_users.txt";
-    }
     std::set<std::string> stringSet;
-    // take longest list and package into AllUsers message
-    for (int i = 0; i < dirs.size(); i++)
+    for (int i = 0; i < fps.size(); i++)
     {
-        std::vector<std::string> list = get_lines_from_file(dirs[i]);
+        std::vector<std::string> list = get_lines_from_file(fps[i]);
         stringSet.insert(list.begin(), list.end());
     }
     std::vector<std::string> users(stringSet.begin(), stringSet.end());
     return users;
-}
-
-std::vector<std::string> getMatchingDirectories(const std::string &baseDirectory, const std::string &regexPattern)
-{
-    // returns
-    //     ./server_1_123
-    //     ./server_1_456
-
-    const std::regex pattern(regexPattern);
-
-    std::vector<std::string> matchingDirectories;
-
-    try
-    {
-        for (const auto &entry : fs::directory_iterator(baseDirectory))
-        {
-            if (fs::is_directory(entry) && std::regex_match(entry.path().filename().string(), pattern))
-            {
-                matchingDirectories.push_back(fs::relative(entry.path(), baseDirectory).string());
-            }
-        }
-    }
-    catch (const std::exception &e)
-    {
-        std::cerr << "Error: " << e.what() << std::endl;
-    }
-
-    return matchingDirectories;
 }
 
 // std::vector<std::string> get_tl_or_fl(int synchID, int clientID, bool tl){

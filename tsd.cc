@@ -587,7 +587,7 @@ int main(int argc, char **argv)
   std::string log_file_name = std::string("server-") + port;
   google::InitGoogleLogging(log_file_name.c_str());
   // FLAGS_logtostderr = true;
-  // FLAGS_alsologtostderr = true;
+  // FLAGS_alsologtostderr=true;
   log(INFO, "Logging Initialized. Server starting...");
   onStartUp();
   RunServer(port);

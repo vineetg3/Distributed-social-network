@@ -11,6 +11,7 @@ import "google/protobuf/timestamp.proto";
 //Init and Heartbeat potentially redundant
 service SynchService{
   rpc GetManagedUsers (Msg) returns (AllUsers) {}
+  rpc GetFL (Msg) return (FlwRel)
 }
 
 message AllUsers{
@@ -19,5 +20,9 @@ message AllUsers{
 
 message Msg{
   string data = 1;
+}
+
+message FlwRel{
+  repeated string rel = 1;
 }
 
