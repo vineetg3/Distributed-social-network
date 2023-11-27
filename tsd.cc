@@ -63,25 +63,35 @@ std::unique_ptr<CoordService::Stub> coord_stub_;
 bool isRegWithCoord = false;
 std::thread hb;
 string root_folder = "";
+string my_role = "";
+string connection_str_slave = "";
 
 void sendHeartBeat();
 bool createFolderIfNotExists(const std::string &folderPath);
 void listDirectoryContents(const std::string &directoryPath);
 void loadClientDB();
+void createClusterFiles();
+bool fileExists(const std::string &filePath);
+std::vector<std::string> get_lines_from_file(std::string filename);
+bool lineExistsInFile(const std::string &filePath, const std::string &targetLine);
+std::string removeFileName(const std::string &input);
+void appendToFile(const std::string &filePath, const std::vector<std::string> &lines);
 
 struct Client
 {
   std::string username;
   bool connected = true;
   int following_file_size = 0;
-  std::vector<Client *> *client_followers;
-  std::vector<Client *> *client_following;
+  std::vector<string> *client_followers;
+  std::vector<string> *client_following; // redundant
   ServerReaderWriter<Message, Message> *stream = 0;
   bool operator==(const Client &c1) const
   {
     return (username == c1.username);
   }
 };
+vector<string> managed_users;
+vector<string> global_users;
 
 // Vector that stores every client that has been created
 std::vector<Client *> client_db;
@@ -121,26 +131,29 @@ class SNSServiceImpl final : public SNSService::Service
 
   Status List(ServerContext *context, const Request *request, ListReply *list_reply) override
   {
+    loadClientDB();
     Client *curUser;
     string name = request->username();
     curUser = getUser(name);
     Client c;
     std::cout << "Followers array size " << curUser->client_followers->size() << std::endl;
-    std::cout << "All users array size " << client_db.size() << std::endl;
-    for (int i = 0; i < client_db.size(); i++)
+    std::cout << "All users array size " << global_users.size() << std::endl;
+    for (int i = 0; i < global_users.size(); i++)
     {
-      list_reply->add_all_users(client_db[i]->username);
+      list_reply->add_all_users(global_users[i]);
     }
+
     for (int i = 0; i < curUser->client_followers->size(); i++)
     {
-      std::cout << curUser->client_followers->at(i)->username.length() << std::endl;
-      list_reply->add_followers(curUser->client_followers->at(i)->username);
+      std::cout << curUser->client_followers->at(i) << std::endl;
+      list_reply->add_followers(curUser->client_followers->at(i));
     }
     return Status::OK;
   }
 
   Status Follow(ServerContext *context, const Request *request, Reply *reply) override
   {
+    loadClientDB();
     Client *curUser;
     Client *userToFollow;
     string name = request->username();
@@ -156,112 +169,103 @@ class SNSServiceImpl final : public SNSService::Service
     userToFollow = getUser(userNameToFollow);
 
     // If user to follow doesn't exist throw error
-    if (userToFollow == NULL)
+    if (!lineExistsInFile("./" + root_folder + "/global_users.txt", userNameToFollow))
     {
       reply->set_msg("FAILURE_INVALID_USERNAME: User " + userNameToFollow + " does not exist.");
       return Status::OK;
     }
 
     // check if curUser is following userToFollow,If not add to following list
-    int flwFlag = 0;
-    for (int i = 0; i < curUser->client_following->size(); i++)
+    // int flwFlag = 0;
+    // for (int i = 0; i < curUser->client_following->size(); i++)
+    // {
+    //   // implicit conversion of ptr userToFollow to reference
+    //   if (curUser->client_following->at(i) == userToFollow)
+    //   {
+    //     flwFlag++;
+    //   }
+    // }
+    if (userToFollow != NULL)
     {
-      // implicit conversion of ptr userToFollow to reference
-      if (curUser->client_following->at(i) == userToFollow)
-      {
-        flwFlag++;
-      }
-    }
-    if (!flwFlag)
-    {
-      curUser->client_following->push_back(userToFollow);
+      // if user to follow is part of current cluster, cache it into memory.
+      // Persistance will happen by sync server.
+      userToFollow->client_followers->push_back(name);
     }
 
-    // add curUser to userToFollow's followers list
-    flwFlag = 0;
-    for (int i = 0; i < userToFollow->client_followers->size(); i++)
-    {
-      if (userToFollow->client_followers->at(i) == curUser)
-      {
-        flwFlag++;
-      }
-    }
-    if (!flwFlag)
-    {
-      userToFollow->client_followers->push_back(curUser);
-    }
+    appendToFile("./" + root_folder + "/follow_relations.txt", {name + " " + userNameToFollow});
 
     reply->set_msg(name + " is following " + userNameToFollow);
     return Status::OK;
   }
 
-  Status UnFollow(ServerContext *context, const Request *request, Reply *reply) override
-  {
-    Client *curUser;
-    Client *userToUnFollow;
-    string name = request->username();
-    string userNameToUnFollow = request->arguments(0);
+  // Status UnFollow(ServerContext *context, const Request *request, Reply *reply) override
+  // {
+  //   Client *curUser;
+  //   Client *userToUnFollow;
+  //   string name = request->username();
+  //   string userNameToUnFollow = request->arguments(0);
 
-    /// If both current user and user to follow are the same throw error.
-    if (name == userNameToUnFollow)
-    {
-      reply->set_msg("FAILURE_INVALID_USERNAME: Cannot unfollow yourself.");
-      return Status::OK;
-    }
+  //   /// If both current user and user to follow are the same throw error.
+  //   if (name == userNameToUnFollow)
+  //   {
+  //     reply->set_msg("FAILURE_INVALID_USERNAME: Cannot unfollow yourself.");
+  //     return Status::OK;
+  //   }
 
-    curUser = getUser(name);
-    userToUnFollow = getUser(userNameToUnFollow);
+  //   curUser = getUser(name);
+  //   userToUnFollow = getUser(userNameToUnFollow);
 
-    // If user To unfollow does not exist throw error.
-    if (userToUnFollow == NULL)
-    {
-      reply->set_msg("FAILURE_INVALID_USERNAME: User " + userNameToUnFollow + " does not exist.");
-      return Status::OK;
-    }
+  //   // If user To unfollow does not exist throw error.
+  //   if (userToUnFollow == NULL)
+  //   {
+  //     reply->set_msg("FAILURE_INVALID_USERNAME: User " + userNameToUnFollow + " does not exist.");
+  //     return Status::OK;
+  //   }
 
-    // if curUser is following userToFollow, remove from following array, else return error
-    int flwidx = -1;
-    for (int i = 0; i < curUser->client_following->size(); i++)
-    {
-      if (curUser->client_following->at(i) == userToUnFollow)
-      {
-        flwidx = i;
-        break;
-      }
-    }
-    if (flwidx == -1)
-    {
-      reply->set_msg("FAILURE_NOT_A_FOLLOWER: Failed with not a follower.");
-      return Status::OK;
-    }
+  //   // if curUser is following userToFollow, remove from following array, else return error
+  //   int flwidx = -1;
+  //   for (int i = 0; i < curUser->client_following->size(); i++)
+  //   {
+  //     if (curUser->client_following->at(i) == userToUnFollow)
+  //     {
+  //       flwidx = i;
+  //       break;
+  //     }
+  //   }
+  //   if (flwidx == -1)
+  //   {
+  //     reply->set_msg("FAILURE_NOT_A_FOLLOWER: Failed with not a follower.");
+  //     return Status::OK;
+  //   }
 
-    // remove user to unfollow
-    curUser->client_following->erase(curUser->client_following->begin() + flwidx);
+  //   // remove user to unfollow
+  //   curUser->client_following->erase(curUser->client_following->begin() + flwidx);
 
-    // if userToUnfollow has follower curUser, remove from  array, else return error
-    flwidx = -1;
-    for (int i = 0; i < userToUnFollow->client_followers->size(); i++)
-    {
-      if (userToUnFollow->client_followers->at(i) == curUser)
-      {
-        flwidx = i;
-        break;
-      }
-    }
-    if (flwidx == -1)
-    {
-      reply->set_msg("FAILURE_NOT_A_FOLLOWER: Failed with not a follower.");
-      return Status::OK;
-    }
-    userToUnFollow->client_followers->erase(userToUnFollow->client_followers->begin() + flwidx);
+  //   // if userToUnfollow has follower curUser, remove from  array, else return error
+  //   flwidx = -1;
+  //   for (int i = 0; i < userToUnFollow->client_followers->size(); i++)
+  //   {
+  //     if (userToUnFollow->client_followers->at(i) == curUser)
+  //     {
+  //       flwidx = i;
+  //       break;
+  //     }
+  //   }
+  //   if (flwidx == -1)
+  //   {
+  //     reply->set_msg("FAILURE_NOT_A_FOLLOWER: Failed with not a follower.");
+  //     return Status::OK;
+  //   }
+  //   userToUnFollow->client_followers->erase(userToUnFollow->client_followers->begin() + flwidx);
 
-    reply->set_msg(name + " unfollowed " + userNameToUnFollow);
-    return Status::OK;
-  }
+  //   reply->set_msg(name + " unfollowed " + userNameToUnFollow);
+  //   return Status::OK;
+  // }
 
   // RPC Login
   Status Login(ServerContext *context, const Request *request, Reply *reply) override
   {
+    loadClientDB();
     cout << "LOGIN FUNC" << endl;
     Client *c;
     string name = request->username();
@@ -270,16 +274,19 @@ class SNSServiceImpl final : public SNSService::Service
     {
       // client doesn't exist
       c = new Client;
-      c->client_followers = new std::vector<Client *>();
-      c->client_following = new std::vector<Client *>();
+      c->client_followers = new std::vector<string>();
+      c->client_following = new std::vector<string>();
       c->connected = true;
       // Create required files.
       const std::string folder_path = root_folder + "/" + name;
       createFolderIfNotExists(folder_path);
       create_or_check_file(folder_path, name, "tl");
-      create_or_check_file(folder_path, name, "follow");
+      create_or_check_file(folder_path, name, "followers");
+      create_or_check_file(folder_path, name, "tl_ptr");
       c->username = name;
       client_db.push_back(c);
+      appendToFile(root_folder + "/managed_users.txt", {name});
+      appendToFile(root_folder + "/global_users.txt", {name});
       cout << "User " + name + " is connected." << endl;
     }
     else if (c->connected == true) // TODO MP2.2 Make connected as true before each other function call??
@@ -300,25 +307,32 @@ class SNSServiceImpl final : public SNSService::Service
 
   void create_or_check_file(std::string rpath, std::string name, string attr)
   {
-    // Open the file in append
+    // Open the file
     string file_path = rpath + "/" + attr + ".txt";
-    std::ofstream outfile(file_path, std::ios::app);
-    if (outfile.is_open())
+
+    if (!fileExists(file_path))
     {
-      // Close the file when done
-      outfile.close();
-      std::cout << file_path + " File created for " + name << std::endl;
+      // If the file doesn't exist, create it
+      std::ofstream createFile(file_path);
+      createFile.close(); // Close the file immediately to ensure it's created
     }
-    else
-    {
-      std::cerr << file_path + " Failed to open the file for " + name << std::endl;
-    }
+    // std::ofstream outfile(file_path, std::ios::app);
+    // if (outfile.is_open())
+    // {
+    //   // Close the file when done
+    //   outfile.close();
+    //   std::cout << file_path + " File created for " + name << std::endl;
+    // }
+    // else
+    // {
+    //   std::cerr << file_path + " Failed to open the file for " + name << std::endl;
+    // }
   }
 
   Status Timeline(ServerContext *context,
                   ServerReaderWriter<Message, Message> *stream) override
   {
-
+    loadClientDB();
     Message m;
     while (stream->Read(&m))
     {
@@ -347,10 +361,10 @@ class SNSServiceImpl final : public SNSService::Service
         // loop through the followers list to send messages and append to follower's timeline
         for (int i = 0; i < c->client_followers->size(); i++)
         {
-          Client *cc = c->client_followers->at(i);
-          // append_to_timeline(c->client_followers->at(i)->username, m.username(), m.timestamp(), m.msg());
-          if (cc->stream != nullptr)
-            cc->stream->Write(m);
+          // Client *cc = c->client_followers->at(i);
+          // // append_to_timeline(c->client_followers->at(i)->username, m.username(), m.timestamp(), m.msg());
+          // if (cc->stream != nullptr)
+          //   cc->stream->Write(m);
         }
       }
     }
@@ -418,6 +432,7 @@ class SNSServiceImpl final : public SNSService::Service
   /// @return
   std::vector<std::vector<std::string>> get_last_20_messages(std::string username)
   {
+
     const std::string file_path = root_folder + "/" + username + "/tl.txt";
 
     // Open the file in input mode to read the existing content
@@ -497,7 +512,7 @@ int registerAsMaster()
   log(INFO, "Trying to register as master...");
   ClientContext context;
   PathAndData request;
-  ReplyStatus response;
+  Confirmation response;
   request.set_serverid(serverID);
   request.set_clusterid(clusterID);
   request.set_hostname("localhost"); // would be gotten from an environment variable
@@ -506,14 +521,14 @@ int registerAsMaster()
   Status status = coord_stub_->Create(&context, request, &response);
   if (status.ok())
   {
-    log(INFO, "Master is.." + response.status());
-    masterID = stoi(response.status());
-    // cout << "master " << masterID << endl;
-    // cout << "server " << serverID << endl;
-    if (masterID == serverID)
-    {
-      log(INFO, "I am the master..");
-    }
+    log(INFO, "I am.." + response.role());
+    // masterID = stoi(response.status());
+    // // cout << "master " << masterID << endl;
+    // // cout << "server " << serverID << endl;
+    // if (masterID == serverID)
+    // {
+    //   log(INFO, "I am the master..");
+    // }
   }
   else
   {
@@ -539,6 +554,7 @@ void onStartUp()
   }
   root_folder = "server_" + to_string(clusterID) + "_" + to_string(serverID);
   createFolderIfNotExists(root_folder);
+  createClusterFiles();
   loadClientDB();
 }
 
@@ -599,7 +615,7 @@ void sendHeartBeat()
 {
   while (true)
   {
-    sleep(5);
+    sleep(8);
     ServerInfo request;
     ClientContext context;
     Confirmation response;
@@ -609,9 +625,20 @@ void sendHeartBeat()
     request.set_hostname("localhost"); // would be gotten from an environment variable
     request.set_port(myPort);
     Status status = coord_stub_->Heartbeat(&context, request, &response);
-    if (response.status())
+    if (status.ok())
     {
       log(INFO, "Heartbeat succeeded..");
+      if (response.role() == "master")
+      {
+        my_role = "master";
+        connection_str_slave = response.data();
+      }
+      else
+      {
+        my_role = "slave";
+        connection_str_slave = "";
+      }
+      cout << "I am.." << my_role << ". Slave connection string :" << connection_str_slave << endl;
     }
     else
     {
@@ -642,25 +669,48 @@ void listDirectoryContents(const std::string &directoryPath)
 
 void loadClientDB()
 {
+  global_users = get_lines_from_file("./" + root_folder + "/global_users.txt");
+  managed_users = get_lines_from_file("./" + root_folder + "/managed_users.txt");
   for (const auto &entry : fs::directory_iterator(root_folder))
   {
     if (entry.is_directory())
     {
       std::cout << "Directory: " << entry.path().filename().string() << std::endl;
-      Client *c = new Client;
-      c->client_followers = new std::vector<Client *>();
-      c->client_following = new std::vector<Client *>();
+      Client *c = NULL;
+      c = getUser(entry.path().filename().string());
+      int nc = 0;
+      if (c == NULL)
+      {
+        nc++;
+        c = new Client;
+      }
+
       c->username = entry.path().filename().string();
+      cout << "In load client DB, entry.path().string() is: " << entry.path().string() << endl;
+
+      // merge current followers with persisted ones
+      set<string> flwrs;
+      if (nc == 0)
+      {
+        // if client in memory get current list of followers
+        flwrs.insert(c->client_followers->begin(), c->client_followers->end());
+      }
+      vector<string> flwrs_from_file = get_lines_from_file(entry.path().string() + "/followers.txt");
+      flwrs.insert(flwrs_from_file.begin(), flwrs_from_file.end());
+      c->client_followers = new vector<string>(flwrs.begin(), flwrs.end());
       c->connected = false;
-      client_db.push_back(c);
+      if (nc == 1)
+      { // push to vector if new client
+        client_db.push_back(c);
+      }
     }
     else if (entry.is_regular_file())
     {
-      std::cout << "File: " << entry.path().string() << std::endl;
+      // std::cout << "File: " << entry.path().string() << std::endl;
     }
     else
     {
-      std::cout << "Other: " << entry.path().string() << std::endl;
+      // std::cout << "Other: " << entry.path().string() << std::endl;
     }
   }
 }
@@ -686,4 +736,157 @@ bool createFolderIfNotExists(const std::string &folderPath)
     std::cout << "Folder already exists: " << folderPath << std::endl;
     return true; // Folder already exists
   }
+}
+
+void createClusterFiles()
+{
+  vector<string> fileNames = {"cluster_tl.txt", "global_users.txt", "managed_users.txt", "follow_relations.txt"};
+  for (const std::string &fileName : fileNames)
+  {
+    // Construct the full file path
+    std::string filePath = "./" + root_folder + '/' + fileName;
+    if (fileExists(filePath))
+      continue;
+
+    // Open the file for writing
+    std::ofstream file(filePath);
+
+    if (file.is_open())
+    {
+      // Close the file
+      file.close();
+      std::cout << "File created: " << filePath << std::endl;
+    }
+    else
+    {
+      std::cerr << "Unable to create the file: " << filePath << std::endl;
+    }
+  }
+}
+
+// Function to check if a file exists
+bool fileExists(const std::string &filePath)
+{
+  struct stat buffer;
+  return (stat(filePath.c_str(), &buffer) == 0);
+}
+
+std::vector<std::string> get_lines_from_file(std::string filename)
+{
+  std::vector<std::string> users;
+  std::string user;
+  std::ifstream file;
+  file.open(filename);
+
+  // Check if the file exists and can be opened
+  if (!file.is_open())
+  {
+    std::cerr << "File does not exist while trying to get lines: " << filename << ". skipping.." << std::endl;
+    return {}; // Return an empty vector
+  }
+  cout << "Lines from file: " << filename << endl;
+  if (file.peek() == std::ifstream::traits_type::eof())
+  {
+    // return empty vector if empty file
+    // std::cout<<"returned empty vector bc empty file"<<std::endl;
+    file.close();
+    return users;
+  }
+  while (!file.eof())
+  {
+    getline(file, user);
+    if (!user.empty())
+    {
+      users.push_back(user);
+      cout << user << endl;
+    }
+  }
+
+  file.close();
+  return users;
+}
+
+bool lineExistsInFile(const std::string &filePath, const std::string &targetLine)
+{
+  std::ifstream file(filePath);
+
+  if (file.is_open())
+  {
+    std::string line;
+    while (getline(file, line))
+    {
+      if (line == targetLine)
+      {
+        file.close();
+        return true; // Line found
+      }
+    }
+
+    file.close();
+  }
+  else
+  {
+    std::cerr << "Unable to open the file: " << filePath << std::endl;
+  }
+
+  return false; // Line not found or file not opened
+}
+
+// Function to append lines to a file
+void appendToFile(const std::string &filePath, const std::vector<std::string> &lines)
+{
+
+  // it appends to file. If file is not found, creates it and then appends
+
+  // create intermediate directories if not existing
+  std::filesystem::create_directories(removeFileName(filePath));
+
+  if (!fileExists(filePath))
+  {
+    // If the file doesn't exist, create it
+    std::ofstream createFile(filePath);
+    createFile.close(); // Close the file immediately to ensure it's created
+  }
+
+  // Check if the file exists
+  if (fileExists(filePath))
+  {
+    // Open the file in append mode
+    std::ofstream file(filePath, std::ios::app);
+
+    if (file.is_open())
+    {
+      // Append each line to the file
+      for (const std::string &line : lines)
+      {
+        file << line << "\n";
+      }
+
+      // Close the file
+      file.close();
+      std::cout << "Lines appended to the file: " << filePath << std::endl;
+    }
+    else
+    {
+      std::cerr << "Unable to open the file for appending." << std::endl;
+    }
+  }
+  else
+  {
+    std::cerr << "File does not exist." << std::endl;
+  }
+}
+
+std::string removeFileName(const std::string &input)
+{
+  std::string cleanedPath = (input.substr(0, 2) == "./") ? input.substr(2) : input;
+  size_t lastSlashPos = cleanedPath.find_last_of('/');
+
+  if (lastSlashPos == std::string::npos)
+  {
+    // No forward slash found, return the original string
+    return input;
+  }
+
+  return "./" + cleanedPath.substr(0, lastSlashPos); // Include the last slash in the result
 }

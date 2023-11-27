@@ -6,3 +6,4 @@ tsc
 tsd
 db/
 synchronizer
+coordinator

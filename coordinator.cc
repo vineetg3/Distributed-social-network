@@ -63,7 +63,7 @@ std::mutex v_mutex;
 std::vector<zNode *> cluster1;
 std::vector<zNode *> cluster2;
 std::vector<zNode *> cluster3;
-std::vector<zNode *> sync_servers(4,NULL);
+std::vector<zNode *> sync_servers(4, NULL);
 std::unordered_map<std::string, int> paths1; // for cluster 1
 std::unordered_map<std::string, int> paths2; // for cluster 2
 std::unordered_map<std::string, int> paths3; // for cluster 3
@@ -137,6 +137,11 @@ string generateMasterPath(int cluster_idx)
   return "ls/cluster" + to_string(cluster_idx) + "/" + "master";
 }
 
+string generateSlavePath(int cluster_idx)
+{
+  return "ls/cluster" + to_string(cluster_idx) + "/" + "slave";
+}
+
 bool zNode::isActive()
 {
   bool status = false;
@@ -169,7 +174,28 @@ class CoordServiceImpl final : public CoordService::Service
     cout << getTimeNow() << "INFO: "
          << "Heartbeat from server_id " << to_string(server_id) << " cluster id " << to_string(cluster_id) << endl;
     cout << "INFO: cluster sizes" << cluster1.size() << " " << cluster2.size() << " " << cluster3.size() << endl;
-    confirmation->set_status(true);
+    string msterPth = generateMasterPath(cluster_id);
+    string slavePth = generateSlavePath(cluster_id);
+    std::vector<zNode *> cluster = getCluster(cluster_id);
+    std::unordered_map<std::string, int> path = getPath(cluster_id);
+    if (path.find(msterPth) != path.end())
+    {
+      if (cluster[path.at(msterPth)]->serverID == server_id)
+      {
+        confirmation->set_role("master");
+        if (path.find(slavePth) != path.end())
+        {
+          // slave exists, forward details to master
+          zNode *zn = cluster[path.at(slavePth)];
+          confirmation->set_data(zn->hostname + ":" + zn->port);
+        }
+      }
+      else
+      {
+        // current HB is not the master
+        confirmation->set_role("slave");
+      }
+    }
     return grpc::Status::OK;
   }
 
@@ -206,7 +232,7 @@ class CoordServiceImpl final : public CoordService::Service
     return grpc::Status::OK;
   }
 
-  grpc::Status Create(ServerContext *context, const PathAndData *pdata, ReplyStatus *status) override
+  grpc::Status Create(ServerContext *context, const PathAndData *pdata, Confirmation *status) override
   {
     v_mutex.lock();
     zNode *newZNode = new zNode;
@@ -231,8 +257,29 @@ class CoordServiceImpl final : public CoordService::Service
         if (cluster[path[master_path]]->isActive())
         {
           // the current Create request for master failed
-          status->set_status(to_string(cluster[path[master_path]]->serverID));
+          status->set_role("slave");
           cout << "Master is already active . Master is: " << to_string(cluster[path[master_path]]->serverID) << endl;
+          // TODO: register as slave
+          //  checking if server already is saved in cluster vector because of previous events.
+          // Would ideally be present as registration to /servers is done first.
+          int newIdx = -1;
+          for (int i = 0; i < cluster.size(); i++)
+          {
+            if (cluster[i]->serverID == pdata->serverid())
+            {
+              newIdx = i;
+              cluster[i] = newZNode; // should ideally free previous reference. But it's ok for the MP
+            }
+          }
+          if (newIdx == -1)
+          {
+            cluster.push_back(newZNode);
+            newIdx = cluster.size() - 1;
+          }
+          string slave_path = generateSlavePath(pdata->clusterid());
+          path[slave_path] = newIdx;
+          log(INFO, "Slave Path created: " << slave_path
+                                           << " with serverID: " << cluster[newIdx]->serverID << " clusterID: " << pdata->clusterid() + " port: " << cluster[newIdx]->port);
           v_mutex.unlock();
           return grpc::Status::OK;
         }
@@ -257,25 +304,19 @@ class CoordServiceImpl final : public CoordService::Service
 
       path[master_path] = newIdx; // registering new master. The previous master is dereferenced.
       log(INFO, "Master Path created: " << master_path << " with serverID: " << cluster[newIdx]->serverID << " clusterID: " << pdata->clusterid() + " port: " << cluster[newIdx]->port);
-      status->set_status(to_string(cluster[path[master_path]]->serverID));
-    }
-    else if (pdata->path() == "/servers")
-    {
-      // TODO MP2.2
-      // 1. check if it already exists. if it does, update heartbeat time
-      // 2. if it doesn't , create new path and point to vector idx
-      // /servers/<server-IDX>
+      // status->set_status(to_string(cluster[path[master_path]]->serverID));
+      status->set_role("master");
     }
     v_mutex.unlock();
     return grpc::Status::OK;
   }
 
-  // Path can be of /servers/<serveridx> or /master. Only these two allowed
+  // Path can be of /slave or /master. Only these two allowed
   grpc::Status Exists(ServerContext *context, const Path *req_path, ReplyStatus *status) override
   {
     unordered_map<string, int> &path = getPath(req_path->clusterid());
     std::vector<zNode *> &cluster = getCluster(req_path->clusterid());
-    if (req_path->path() == "/master")
+    if (req_path->path() == "/master") // not really used
     {
       string master_path = generateMasterPath(req_path->clusterid());
       // We need to check if master is already registered and if the master is active.
@@ -290,49 +331,51 @@ class CoordServiceImpl final : public CoordService::Service
         }
       }
     }
-    else if (req_path->path() == "/servers/" + req_path->serverid())
+    else if (req_path->path() == "/slave") // return slave details if it exists
     {
+      string slave_path = generateMasterPath(req_path->clusterid());
       // TODO MP2.2
-      if (path.find("/servers/" + req_path->serverid()) != path.end())
+      if (path.find(slave_path) != path.end())
       {
-        // if active, update heartbeat timestamp and all
-      }
-      else
-      {
-        // add to path and cluster vector
+        std::vector<zNode *> cluster = getCluster(req_path->clusterid());
+        std::unordered_map<std::string, int> path = getPath(req_path->clusterid());
+        // slave exists, forward details to master
+        zNode *zn = cluster[path.at(slave_path)];
+        status->set_status(zn->hostname + ":" + zn->port);
       }
     }
     return grpc::Status::OK;
   }
- 
-  grpc::Status RegFS(ServerContext *context, const ServerInfo *server_info, Confirmation *status) override
+
+  grpc::Status RegFS(ServerContext *context, const ServerInfo *server_info, ReplyStatus *status) override
   {
-    zNode* newZNode = new zNode;
+    zNode *newZNode = new zNode;
     newZNode->hostname = server_info->hostname();
     newZNode->port = server_info->port();
     newZNode->missed_heartbeat = false;
     newZNode->last_heartbeat = getTimeNow();
     sync_servers[server_info->clusterid()] = newZNode;
     status->set_status("success");
-    log(INFO, "Registered sync server "<< newZNode->port << " "<<server_info->clusterid());
+    log(INFO, "Registered sync server " << newZNode->port << " " << server_info->clusterid());
     return grpc::Status::OK;
   }
 
   grpc::Status GetFS(ServerContext *context, const ID *id, ServerList *list) override
   {
-    for(int i=1;i<=3;i++){
-      if(sync_servers[i]==NULL){
-        cout<<"Sync server "<<i<<" is null."<<endl;
+    for (int i = 1; i <= 3; i++)
+    {
+      if (sync_servers[i] == NULL)
+      {
+        cout << "Sync server " << i << " is null." << endl;
         continue;
       }
-      ServerInfo* si = list->add_servers();
+      ServerInfo *si = list->add_servers();
       si->set_hostname(sync_servers[i]->hostname);
       si->set_port(sync_servers[i]->port);
       si->set_clusterid(i);
     }
     return grpc::Status::OK;
   }
-
 };
 
 void RunServer(std::string port_no)
@@ -413,9 +456,22 @@ void checkHeartbeat()
             std::unordered_map<std::string, int> &path = getPath(i);
             // delete path as heartbeat is missed. TODO: create seperate thread safe function for paths map
             string msterPth = generateMasterPath(i);
+            string slavePth = generateSlavePath(i);
             if (path.at(msterPth) == j) // THIS IS IMPORTANT check. Master path might exist which doesnt point to dead server. lets not delete that
             {
-              path.erase(msterPth); // soft deletion as current server is at master. For Mp2.2 delete registration path as well.
+              if (path.find(slavePth) != path.end())
+              {
+                // slave exists. assign slave as master
+                path[msterPth] = path[slavePth];
+                path.erase(slavePth);
+                log(INFO, "Master erased. New master for cluster " << i << ": server" << path[msterPth]);
+              }
+              else
+              {
+                log(INFO, "Master erased for cluster " << i);
+
+                path.erase(msterPth); // soft deletion as current server is at master. For Mp2.2 delete registration path as well.
+              }
             }
             // TODO MP2.2 remove path /servers
           }

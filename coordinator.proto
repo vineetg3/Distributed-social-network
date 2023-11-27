@@ -11,10 +11,10 @@ import "google/protobuf/timestamp.proto";
 service CoordService{
   rpc Heartbeat (ServerInfo) returns (Confirmation) {}
   rpc GetServer (ID) returns (ServerInfo) {}
-  rpc RegFS (ServerInfo) returns (Confirmation) {}
+  rpc RegFS (ServerInfo) returns (ReplyStatus) {}
   rpc GetFS (ID) returns (ServerList) {}
   // ZooKeeper API here
-  rpc Create (PathAndData) returns (ReplyStatus){}
+  rpc Create (PathAndData) returns (Confirmation){}
   rpc Exists (Path) returns (ReplyStatus) {}
 }
 
@@ -29,7 +29,8 @@ message ServerInfo{
 
 //confirmation message definition
 message Confirmation{
-  bool status = 1;
+  string role = 1;
+  string data = 2;
 }
 
 //id message definition

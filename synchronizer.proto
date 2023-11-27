@@ -8,10 +8,10 @@ import "google/protobuf/timestamp.proto";
 // These are the different functionalities exposed by service
 // ------------------------------------------------------------
 
-//Init and Heartbeat potentially redundant
 service SynchService{
   rpc GetManagedUsers (Msg) returns (AllUsers) {}
   rpc GetFL (Msg) returns (FlwRel) {}
+  rpc SendTL (Timelines) returns (Msg) {}
 }
 
 message AllUsers{
@@ -24,5 +24,9 @@ message Msg{
 
 message FlwRel{
   repeated string rel = 1;
+}
+
+message Timelines{
+  repeated string lines = 1;
 }
 

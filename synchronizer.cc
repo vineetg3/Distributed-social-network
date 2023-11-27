@@ -34,9 +34,11 @@ using csce438::Msg;
 using csce438::CoordService;
 using csce438::FlwRel;
 using csce438::ID;
+using csce438::ReplyStatus;
 using csce438::ServerInfo;
 using csce438::ServerList;
 using csce438::SynchService;
+using csce438::Timelines;
 
 // using csce438::TLFL;
 using google::protobuf::Duration;
@@ -77,6 +79,13 @@ int sync_follow(std::vector<zNode *> &sync_servers, vector<std::unique_ptr<Synch
 map<string, set<string>> generateFlwMp(vector<string> &flwrels);
 std::vector<std::string> splitString(const std::string &input, char delimiter);
 std::string removeFileName(const std::string &input);
+void appendToFile(const std::string &filePath, const std::vector<std::string> &lines);
+bool fileExists(const std::string &filePath);
+std::uintmax_t getFileSize(const std::string &filePath);
+int sync_tl(std::vector<zNode *> &sync_servers, vector<std::unique_ptr<SynchService::Stub>> &fs_stubs, int syncId);
+void emptyTextFiles(const std::vector<std::string> &filePaths);
+
+std::mutex tl_mutex;
 
 class SynchServiceImpl final : public SynchService::Service
 {
@@ -106,33 +115,54 @@ class SynchServiceImpl final : public SynchService::Service
         return Status::OK;
     }
 
-    //     Status GetTLFL(ServerContext* context, const ID* id, TLFL* tlfl){
-    //         //std::cout<<"Got GetTLFL"<<std::endl;
-    //         int clientID = id->id();
-
-    //         std::vector<std::string> tl = get_tl_or_fl(synchID, clientID, true);
-    //         std::vector<std::string> fl = get_tl_or_fl(synchID, clientID, false);
-
-    //         //now populate TLFL tl and fl for return
-    //         for(auto s:tl){
-    //             tlfl->add_tl(s);
-    //         }
-    //         for(auto s:fl){
-    //             tlfl->add_fl(s);
-    //         }
-    //         tlfl->set_status(true);
-
-    //         return Status::OK;
-    //     }
-
-    //     Status ResynchServer(ServerContext* context, const ServerInfo* serverinfo, Confirmation* c){
-    //         std::cout<<serverinfo->type()<<"("<<serverinfo->serverid()<<") just restarted and needs to be resynched with counterpart"<<std::endl;
-    //         std::string backupServerType;
-
-    //         // YOUR CODE HERE
-
-    //         return Status::OK;
-    //     }
+    Status SendTL(ServerContext *context, const Timelines *TLs, Msg *msg) override
+    {
+        // will append post if current cluster manages the receipients of the post(followers)
+        std::cout << "Got SendTL" << std::endl;
+        string clientID = msg->data();
+        int num = -1;
+        vector<vector<string>> posts;
+        vector<string> tmp;
+        vector<string> managed_users = get_all_managed_users_func(synchID);
+        for (string str : TLs->lines())
+        {
+            cout << "Received line in TLs: " << str << endl;
+            num++;
+            if (num % 4 == 3)
+            {
+                tmp.push_back(str);
+                posts.push_back(tmp);
+                tmp.clear();
+            }
+            else
+            {
+                tmp.push_back(str);
+            }
+        }
+        vector<string> server_paths = getMatchingFilePaths(synchID, "");
+        for (int i = 0; i < posts.size(); i++)
+        {
+            vector<string> splits = splitString(posts[i][0], ' ');
+            for (int j = 0; j < managed_users.size(); j++)
+            {
+                string cur_user = managed_users[j];
+                auto it = std::find(splits.begin(), splits.end(), cur_user);
+                if (it != splits.end())
+                {
+                    for (int k = 0; k < server_paths.size(); k++)
+                    {
+                        string fp = server_paths[k] + "/" + cur_user + "/tl.txt";
+                        std::vector<std::string> newStrings = {posts[i][1],
+                                                               posts[i][2],
+                                                               posts[i][3]};
+                        appendToFile(fp, newStrings);
+                        std::cout << "Posts being updated for user : " << fp << std::endl;
+                    }
+                }
+            }
+        }
+        return Status::OK;
+    }
 };
 
 void RunServer(std::string coordIP, std::string coordPort, std::string port_no, int synchID)
@@ -212,8 +242,8 @@ void run_synchronizer(std::string coordIP, std::string coordPort, std::string po
     std::cout << "MADE STUB" << std::endl;
 
     ServerInfo msg;
-    Confirmation c;
     grpc::ClientContext context;
+    ReplyStatus c;
 
     msg.set_clusterid(synchID);
     msg.set_hostname("127.0.0.1");
@@ -276,43 +306,53 @@ void run_synchronizer(std::string coordIP, std::string coordPort, std::string po
         }
         log(INFO, "**** End Follower sync *****");
 
-        //         //1. synch all users file
-        //             //get list of all followers
-
-        //             // YOUR CODE HERE
-        //             //set up stub
-        //             //send each a GetAllUsers request
-        //             //aggregate users into a list
-        //             //sort list and remove duplicates
-
-        //             // YOUR CODE HERE
-
-        //             //for all the found users
-        //             //if user not managed by current synch
-        //             // ...
-
-        //             // YOUR CODE HERE
-
-        // 	    //force update managed users from newly synced users
-        //             //for all users
-        //             for(auto i : aggregated_users){
-        //                 //get currently managed users
-        //                 //if user IS managed by current synch
-        //                     //read their follower lists
-        //                     //for followed users that are not managed on cluster
-        //                     //read followed users cached timeline
-        //                     //check if posts are in the managed tl
-        //                     //add post to tl of managed user
-
-        //                      // YOUR CODE HERE
-        //                     }
-        //                 }
-        //             }
         cout << endl
              << endl;
     }
     //     return;
 }
+
+//////*********  SYNC Timelines **********/////////
+
+int sync_tl(std::vector<zNode *> &sync_servers, vector<std::unique_ptr<SynchService::Stub>> &fs_stubs, int syncId)
+{
+    // read from the larger cluster_tl.txt file
+    // broadcast to all FS
+    vector<string> server_paths = getMatchingFilePaths(syncId, "/cluster_tl.txt");
+    std::uintmax_t mx = 0;
+    int mx_fp = 0;
+    for (int i = 0; i < server_paths.size(); i++)
+    {
+        // string tl_fp = server_paths[i];
+        if (mx < getFileSize(server_paths[i]))
+        {
+            mx_fp = i;
+        }
+    }
+    vector<string> lines = get_lines_from_file(server_paths[mx_fp]);
+    emptyTextFiles(server_paths);
+    Timelines tls;
+    for (string str : lines)
+    {
+        tls.add_lines(str);
+    }
+    for (auto &stub_ : fs_stubs)
+    {
+        ClientContext cc;
+        Msg msg;
+        msg.set_data(to_string(syncId));
+        grpc::Status status;
+        status = stub_->SendTL(&cc, tls, &msg);
+        if (!status.ok())
+        {
+            std::cerr << "gRPC status code: " << status.error_code() << std::endl;
+            std::cerr << "Error message: " << status.error_message() << std::endl;
+            return 0;
+        }
+    }
+    return 1;
+}
+
 //////*********  SYNC FOLLOW RELATIONS **********/////////
 
 int sync_follow(std::vector<zNode *> &sync_servers, vector<std::unique_ptr<SynchService::Stub>> &fs_stubs, int syncId)
@@ -454,7 +494,7 @@ std::vector<std::string> get_lines_from_file(std::string filename)
         file.close();
         return users;
     }
-    while (file)
+    while (!file.eof())
     {
         getline(file, user);
         if (!user.empty())
@@ -465,12 +505,6 @@ std::vector<std::string> get_lines_from_file(std::string filename)
     }
 
     file.close();
-
-    // std::cout<<"File: "<<filename<<" has users:"<<std::endl;
-    /*for(int i = 0; i<users.size(); i++){
-      std::cout<<users[i]<<std::endl;
-    }*/
-
     return users;
 }
 
@@ -549,8 +583,6 @@ std::vector<std::string> getMatchingFilePaths(int syncID, string suffixPath)
     return matchingDirectories;
 }
 
-//////*********  END **********/////////
-
 bool file_contains_user(std::string filename, std::string user)
 {
     std::vector<std::string> users;
@@ -610,24 +642,96 @@ std::vector<std::string> splitString(const std::string &input, char delimiter)
     return tokens;
 }
 
-// std::vector<std::string> get_tl_or_fl(int synchID, int clientID, bool tl){
-//     std::string master_fn = "./master"+std::to_string(synchID)+"/"+std::to_string(clientID);
-//     std::string slave_fn = "./slave"+std::to_string(synchID)+"/" + std::to_string(clientID);
-//     if(tl){
-//         master_fn.append("_timeline");
-//         slave_fn.append("_timeline");
-//     }else{
-//         master_fn.append("_follow_list");
-//         slave_fn.append("_follow_list");
-//     }
+// Function to check if a file exists
+bool fileExists(const std::string &filePath)
+{
+    struct stat buffer;
+    return (stat(filePath.c_str(), &buffer) == 0);
+}
 
-//     std::vector<std::string> m = get_lines_from_file(master_fn);
-//     std::vector<std::string> s = get_lines_from_file(slave_fn);
+// Function to append lines to a file. If it doesnt exist, creates it.
+void appendToFile(const std::string &filePath, const std::vector<std::string> &lines)
+{
 
-//     if(m.size()>=s.size()){
-//         return m;
-//     }else{
-//         return s;
-//     }
+    // it appends to file. If file is not found, creates it and then appends
 
-// }
+    // create intermediate directories if not existing
+    std::filesystem::create_directories(removeFileName(filePath));
+
+    if (!fileExists(filePath))
+    {
+        // If the file doesn't exist, create it
+        std::ofstream createFile(filePath);
+        createFile.close(); // Close the file immediately to ensure it's created
+    }
+
+    // Check if the file exists
+    if (fileExists(filePath))
+    {
+        // Open the file in append mode
+        std::ofstream file(filePath, std::ios::app);
+
+        if (file.is_open())
+        {
+            // Append each line to the file
+            for (const std::string &line : lines)
+            {
+                file << line << '\n';
+            }
+
+            // Close the file
+            file.close();
+            std::cout << "Lines appended to the file: " << filePath << std::endl;
+        }
+        else
+        {
+            std::cerr << "Unable to open the file for appending." << std::endl;
+        }
+    }
+    else
+    {
+        std::cerr << "File does not exist." << std::endl;
+    }
+}
+
+std::uintmax_t getFileSize(const std::string &filePath)
+{
+    try
+    {
+        // Check if the file exists
+        if (std::filesystem::exists(filePath))
+        {
+            // Get the file size
+            return std::filesystem::file_size(filePath);
+        }
+        else
+        {
+            return 0;
+        }
+    }
+    catch (const std::filesystem::filesystem_error &ex)
+    {
+        // Handle filesystem errors
+        throw std::runtime_error("Error getting file size: " + std::string(ex.what()));
+    }
+}
+
+void emptyTextFiles(const std::vector<std::string> &filePaths)
+{
+    for (const std::string &filePath : filePaths)
+    {
+        // Open the file in truncation mode to empty its content
+        std::ofstream file(filePath, std::ios::trunc);
+
+        if (file.is_open())
+        {
+            // Close the file to ensure changes are saved
+            file.close();
+            std::cout << "File emptied: " << filePath << std::endl;
+        }
+        else
+        {
+            std::cerr << "Unable to open the file: " << filePath << std::endl;
+        }
+    }
+}
