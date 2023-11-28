@@ -19,6 +19,7 @@
 #include <grpc++/grpc++.h>
 #include <glog/logging.h>     // for LOG
 #include <glog/raw_logging.h> // for RAW_LOG
+#include <stack>
 
 #include "coordinator.grpc.pb.h"
 
@@ -67,6 +68,9 @@ std::vector<zNode *> sync_servers(4, NULL);
 std::unordered_map<std::string, int> paths1; // for cluster 1
 std::unordered_map<std::string, int> paths2; // for cluster 2
 std::unordered_map<std::string, int> paths3; // for cluster 3
+stack<int> lastMasterServer1;
+stack<int> lastMasterServer2;
+stack<int> lastMasterServer3;
 
 // func declarations
 int findServer(std::vector<zNode *> v, int id);
@@ -119,6 +123,51 @@ std::unordered_map<std::string, int> &getPath(int idx)
   }
   }
   return paths1;
+}
+
+int getLastMasterServer(int idx)
+{
+  switch (idx)
+  {
+  case 1:
+  {
+    return lastMasterServer1.empty() ? -1 : lastMasterServer1.top();
+    break;
+  }
+  case 2:
+  {
+    return lastMasterServer2.empty() ? -1 : lastMasterServer2.top();
+    break;
+  }
+  case 3:
+  {
+    return lastMasterServer3.empty() ? -1 : lastMasterServer3.top();
+    break;
+  }
+  }
+  return 1;
+}
+
+void pushMasterServer(int idx, int masterID)
+{
+  switch (idx)
+  {
+  case 1:
+  {
+    return lastMasterServer1.push(masterID);
+    break;
+  }
+  case 2:
+  {
+    return lastMasterServer2.push(masterID);
+    break;
+  }
+  case 3:
+  {
+    return lastMasterServer3.push(masterID);
+    break;
+  }
+  }
 }
 
 zNode *getZNode(int server_id, int cluster_id)
@@ -250,6 +299,9 @@ class CoordServiceImpl final : public CoordService::Service
       string master_path = generateMasterPath(pdata->clusterid());
       std::vector<zNode *> &cluster = getCluster(pdata->clusterid());
 
+      // send last master id
+      status->set_data(to_string(getLastMasterServer(pdata->clusterid())));
+
       // We need to check if master is already registered and if the master is active.
       if (path.find(master_path) != path.end())
       {
@@ -303,6 +355,7 @@ class CoordServiceImpl final : public CoordService::Service
       }
 
       path[master_path] = newIdx; // registering new master. The previous master is dereferenced.
+      pushMasterServer(pdata->clusterid(), pdata->serverid());
       log(INFO, "Master Path created: " << master_path << " with serverID: " << cluster[newIdx]->serverID << " clusterID: " << pdata->clusterid() + " port: " << cluster[newIdx]->port);
       // status->set_status(to_string(cluster[path[master_path]]->serverID));
       status->set_role("master");
@@ -464,7 +517,9 @@ void checkHeartbeat()
                 // slave exists. assign slave as master
                 path[msterPth] = path[slavePth];
                 path.erase(slavePth);
-                log(INFO, "Master erased. New master for cluster " << i << ": server" << path[msterPth]);
+                std::vector<zNode *> cluster = getCluster(i);
+                pushMasterServer(i, cluster[path[msterPth]]->serverID);
+                log(INFO, "Master erased. New master for cluster " << i << " is: " << cluster[path[msterPth]]->serverID);
               }
               else
               {

@@ -62,6 +62,7 @@ int masterID = -1;
 std::unique_ptr<CoordService::Stub> coord_stub_;
 bool isRegWithCoord = false;
 std::thread hb;
+std::thread tlUpdatesThread;
 string root_folder = "";
 string my_role = "";
 string connection_str_slave = "";
@@ -76,6 +77,12 @@ std::vector<std::string> get_lines_from_file(std::string filename);
 bool lineExistsInFile(const std::string &filePath, const std::string &targetLine);
 std::string removeFileName(const std::string &input);
 void appendToFile(const std::string &filePath, const std::vector<std::string> &lines);
+std::unique_ptr<SNSService::Stub> getSlaveStub(string connection_str);
+std::vector<std::string> get_lines_from_file_from_linenum(std::string filename, int linenum);
+google::protobuf::Timestamp *stringToTimestamp(const std::string &str);
+std::vector<std::vector<std::string>> get_TLmessages_from_linenum(std::string username, int linenum);
+void sendTLUpdates();
+std::mutex tl_mutex;
 
 struct Client
 {
@@ -84,12 +91,15 @@ struct Client
   int following_file_size = 0;
   std::vector<string> *client_followers;
   std::vector<string> *client_following; // redundant
-  ServerReaderWriter<Message, Message> *stream = 0;
+  ServerReaderWriter<Message, Message> *stream = nullptr;
   bool operator==(const Client &c1) const
   {
     return (username == c1.username);
   }
+  int tl_line_num = 0;
 };
+void sendTLBackLogUpdates(Client *client);
+
 vector<string> managed_users;
 vector<string> global_users;
 
@@ -114,14 +124,12 @@ Client *getUser(string username)
   return NULL;
 }
 
-Message MakeMessage(const std::string &username, const std::string &msg)
+Message MakeMessage(string ts, const std::string &username, const std::string &msg)
 {
   Message m;
   m.set_username(username);
   m.set_msg(msg);
-  google::protobuf::Timestamp *timestamp = new google::protobuf::Timestamp();
-  timestamp->set_seconds(time(NULL));
-  timestamp->set_nanos(0);
+  google::protobuf::Timestamp *timestamp = stringToTimestamp(ts);
   m.set_allocated_timestamp(timestamp);
   return m;
 }
@@ -131,6 +139,17 @@ class SNSServiceImpl final : public SNSService::Service
 
   Status List(ServerContext *context, const Request *request, ListReply *list_reply) override
   {
+    if (my_role == "master")
+    {
+      if (connection_str_slave.length() != 0)
+      {
+        // slave exists. hence forward requests
+        std::unique_ptr<SNSService::Stub> stubPtr = getSlaveStub(connection_str_slave);
+        ClientContext cc;
+        ListReply lr;
+        stubPtr->List(&cc, *request, &lr);
+      }
+    }
     loadClientDB();
     Client *curUser;
     string name = request->username();
@@ -153,6 +172,17 @@ class SNSServiceImpl final : public SNSService::Service
 
   Status Follow(ServerContext *context, const Request *request, Reply *reply) override
   {
+    if (my_role == "master")
+    {
+      if (connection_str_slave.length() != 0)
+      {
+        // slave exists. hence forward requests
+        std::unique_ptr<SNSService::Stub> stubPtr = getSlaveStub(connection_str_slave);
+        ClientContext cc;
+        Reply rp;
+        stubPtr->Follow(&cc, *request, &rp);
+      }
+    }
     loadClientDB();
     Client *curUser;
     Client *userToFollow;
@@ -169,7 +199,7 @@ class SNSServiceImpl final : public SNSService::Service
     userToFollow = getUser(userNameToFollow);
 
     // If user to follow doesn't exist throw error
-    if (!lineExistsInFile("./" + root_folder + "/global_users.txt", userNameToFollow))
+    if (find(global_users.begin(), global_users.end(), userNameToFollow) == global_users.end())
     {
       reply->set_msg("FAILURE_INVALID_USERNAME: User " + userNameToFollow + " does not exist.");
       return Status::OK;
@@ -265,6 +295,17 @@ class SNSServiceImpl final : public SNSService::Service
   // RPC Login
   Status Login(ServerContext *context, const Request *request, Reply *reply) override
   {
+    if (my_role == "master")
+    {
+      if (connection_str_slave.length() != 0)
+      {
+        // slave exists. hence forward requests
+        std::unique_ptr<SNSService::Stub> stubPtr = getSlaveStub(connection_str_slave);
+        ClientContext cc;
+        Reply rp;
+        stubPtr->Login(&cc, *request, &rp);
+      }
+    }
     loadClientDB();
     cout << "LOGIN FUNC" << endl;
     Client *c;
@@ -285,8 +326,8 @@ class SNSServiceImpl final : public SNSService::Service
       create_or_check_file(folder_path, name, "tl_ptr");
       c->username = name;
       client_db.push_back(c);
-      appendToFile(root_folder + "/managed_users.txt", {name});
-      appendToFile(root_folder + "/global_users.txt", {name});
+      appendToFile("./" + root_folder + "/managed_users.txt", {name});
+      appendToFile("./" + root_folder + "/global_users.txt", {name});
       cout << "User " + name + " is connected." << endl;
     }
     else if (c->connected == true) // TODO MP2.2 Make connected as true before each other function call??
@@ -294,6 +335,7 @@ class SNSServiceImpl final : public SNSService::Service
       // client exists so set error message and return
       cout << "CLIENT EXISTS!.." << endl;
       reply->set_msg("FAILURE_NOT_EXISTS: User already exists.");
+      c->stream = nullptr;
     }
     else if (c->connected == false)
     {
@@ -301,6 +343,7 @@ class SNSServiceImpl final : public SNSService::Service
       // So now we connect the client to server and make the client live.
       cout << "MAKING THE CLIENT CONNECTED.." << endl;
       c->connected = true;
+      c->stream = nullptr;
     }
     return Status::OK;
   }
@@ -316,61 +359,59 @@ class SNSServiceImpl final : public SNSService::Service
       std::ofstream createFile(file_path);
       createFile.close(); // Close the file immediately to ensure it's created
     }
-    // std::ofstream outfile(file_path, std::ios::app);
-    // if (outfile.is_open())
-    // {
-    //   // Close the file when done
-    //   outfile.close();
-    //   std::cout << file_path + " File created for " + name << std::endl;
-    // }
-    // else
-    // {
-    //   std::cerr << file_path + " Failed to open the file for " + name << std::endl;
-    // }
   }
 
   Status Timeline(ServerContext *context,
                   ServerReaderWriter<Message, Message> *stream) override
   {
-    loadClientDB();
     Message m;
     while (stream->Read(&m))
     {
+      loadClientDB();
       std::string username = m.username();
       Client *c = getUser(username);
 
       // save the stream to client object, for subsequent writes
       if (m.is_initial() == 1)
+      {
         c->stream = stream;
+        c->tl_line_num = 0;
+      }
 
       // If the message is initial, i.e Just started timeline mode, we send back, the latest 20 messages
       // by reading the user_tl file.
 
       if (m.is_initial() == 1)
       {
-        // read 20 latest massages from file currentuser_timeline
-        std::vector<std::vector<std::string>> msgs = get_last_20_messages(username);
-        for (int i = 0; i < msgs.size(); i++)
-        {
-          Message m1 = MakeMessage(msgs[i][1], msgs[i][2]);
-          stream->Write(m1);
-        }
+        sendTLBackLogUpdates(c);
       }
-      else
+      if (m.is_initial() != 1)
       {
-        // loop through the followers list to send messages and append to follower's timeline
+        // note that intial message is dummy message
+        string flwrs = "";
         for (int i = 0; i < c->client_followers->size(); i++)
         {
-          // Client *cc = c->client_followers->at(i);
-          // // append_to_timeline(c->client_followers->at(i)->username, m.username(), m.timestamp(), m.msg());
-          // if (cc->stream != nullptr)
-          //   cc->stream->Write(m);
+          if (i == 0)
+          {
+            flwrs = c->client_followers->at(i);
+            continue;
+          }
+          flwrs += " " + c->client_followers->at(i);
         }
+        cout << "Timeline Function, flwrs string for user: " << username << " " << flwrs << endl;
+
+        // write to cluster_tl file
+        std::vector<std::string> newStrings = {flwrs,
+                                               "T " + google::protobuf::util::TimeUtil::ToString(m.timestamp()),
+                                               "U " + m.username(),
+                                               "W " + m.msg()};
+        appendToFile("./" + root_folder + "/cluster_tl.txt", newStrings);
       }
     }
     return Status::OK;
   }
 
+  // DEPRECATED
   void append_to_timeline(std::string username, std::string puser, google::protobuf::Timestamp ptime,
                           std::string ppost)
   {
@@ -427,59 +468,6 @@ class SNSServiceImpl final : public SNSService::Service
     std::cout << "Strings appended to the top of the file." << std::endl;
   }
 
-  /// @brief Gets the last 20 messages saved to the user's timeline
-  /// @param username
-  /// @return
-  std::vector<std::vector<std::string>> get_last_20_messages(std::string username)
-  {
-
-    const std::string file_path = root_folder + "/" + username + "/tl.txt";
-
-    // Open the file in input mode to read the existing content
-    std::ifstream infile(file_path);
-
-    if (!infile)
-    {
-      std::cerr << "Failed to open the file." << std::endl;
-    }
-
-    // Read the existing content line by line into a vector
-    std::vector<std::string> lines;
-    std::string line;
-
-    while (std::getline(infile, line))
-    {
-      lines.push_back(line);
-    }
-
-    // Messages vector will be populated to the scheme
-    //{{timestamp1,username1,msg1},{timestamp2,username2,msg2}..}
-    std::vector<std::vector<std::string>> messages;
-    int ct = 0;
-
-    // Process every set of 3 lines(timestamp,user,msg) and push to vector
-    for (int i = 0; i < lines.size();)
-    {
-      if (ct == 20)
-        break;
-
-      std::vector<std::string> reply_msg;
-      for (int j = 0; j < 3; j++)
-      {
-        if (lines[i + j].back() == '\n')
-        {
-          lines[i + j].pop_back();
-        }
-        // slice the required string by removing the identifier i.e T, U, W
-        reply_msg.push_back(lines[i + j].substr(2));
-      }
-      messages.push_back(reply_msg);
-      ct++;
-      i += 3;
-    }
-    return messages;
-  }
-
   Status CheckIfAlive(ServerContext *context, const Request *request, Reply *reply) override
   {
     reply->set_msg("Alive");
@@ -501,13 +489,7 @@ void RunServer(std::string port_no)
   server->Wait();
 }
 
-void registerAsServer()
-{
-  // TODO: MP2.2
-  isRegWithCoord = true;
-}
-
-int registerAsMaster()
+int registerAsMaster(string &lastMasterID)
 {
   log(INFO, "Trying to register as master...");
   ClientContext context;
@@ -522,6 +504,9 @@ int registerAsMaster()
   if (status.ok())
   {
     log(INFO, "I am.." + response.role());
+    lastMasterID = response.data();
+    isRegWithCoord = true;
+    my_role = response.role();
     // masterID = stoi(response.status());
     // // cout << "master " << masterID << endl;
     // // cout << "server " << serverID << endl;
@@ -546,16 +531,22 @@ void connectToCoordinator()
 void onStartUp()
 {
   connectToCoordinator();
-  registerAsMaster();
-  registerAsServer();
-  if (masterID != -1 || isRegWithCoord)
+  string lastMasterID;
+  registerAsMaster(lastMasterID);
+  if (isRegWithCoord)
   {
     hb = std::thread(sendHeartBeat);
   }
   root_folder = "server_" + to_string(clusterID) + "_" + to_string(serverID);
+  if (my_role == "slave")
+  {
+    // copy files from master if exists
+    cout << "last master ID is: " << lastMasterID << endl;
+  }
   createFolderIfNotExists(root_folder);
   createClusterFiles();
   loadClientDB();
+  tlUpdatesThread = std::thread(sendTLUpdates);
 }
 
 int main(int argc, char **argv)
@@ -608,6 +599,7 @@ int main(int argc, char **argv)
   onStartUp();
   RunServer(port);
   hb.join();
+  tlUpdatesThread.join();
   return 0;
 }
 
@@ -624,6 +616,7 @@ void sendHeartBeat()
     request.set_clusterid(clusterID);
     request.set_hostname("localhost"); // would be gotten from an environment variable
     request.set_port(myPort);
+    cout << "sending heartbeat.." << endl;
     Status status = coord_stub_->Heartbeat(&context, request, &response);
     if (status.ok())
     {
@@ -764,6 +757,129 @@ void createClusterFiles()
   }
 }
 
+// Timeline updates to read from file
+
+void sendTLBackLogUpdates(Client *client)
+{
+  tl_mutex.lock();
+  std::vector<std::vector<std::string>> msgs = get_TLmessages_from_linenum(client->username, client->tl_line_num);
+  for (int i = 0; i < msgs.size(); i++)
+  {
+    Message m1 = MakeMessage(msgs[i][0], msgs[i][1], msgs[i][2]);
+    if (my_role == "master")
+    {
+      if (client->stream != nullptr)
+      {
+        try
+        {
+          cout << "Sending TL updates.." << endl;
+          cout << "message is " << m1.username() << " " << m1.msg() << " " << m1.timestamp() << endl;
+          if (!client->stream->Write(m1))
+          {
+            cout << "Stream closed!!!" << endl;
+          }
+          cout << "after write" << endl;
+          client->tl_line_num += 3;
+        }
+        catch (const exception &e)
+        {
+          cout << " grpc Error: " << e.what() << endl;
+        }
+      }
+    }
+  }
+  tl_mutex.unlock();
+}
+
+void sendTLUpdates()
+{
+  while (true)
+  {
+    // loadClientDB();
+    cout << "Checking for TL updates.." << endl;
+    for (int i = 0; i < client_db.size(); i++)
+    {
+      Client *client = client_db[i];
+      if (client->stream != nullptr)
+      {
+        sendTLBackLogUpdates(client);
+      }
+    }
+    sleep(5);
+  }
+}
+
+google::protobuf::Timestamp *stringToTimestamp(const std::string &str)
+{
+  std::tm tm = {};
+  std::istringstream ss(str);
+  ss >> std::get_time(&tm, "%Y-%m-%dT%H:%M:%S");
+
+  if (ss.fail())
+  {
+    // Handle parsing failure
+    throw std::invalid_argument("Failed to parse timestamp");
+  }
+
+  google::protobuf::Timestamp *timestamp = new google::protobuf::Timestamp();
+  timestamp->set_seconds(std::mktime(&tm));
+  timestamp->set_nanos(0);
+
+  return timestamp;
+}
+
+/// @brief Gets the last 20 messages saved to the user's timeline
+/// @param username
+/// @return
+std::vector<std::vector<std::string>> get_TLmessages_from_linenum(std::string username, int linenum)
+{
+
+  const std::string file_path = root_folder + "/" + username + "/tl.txt";
+
+  // Open the file in input mode to read the existing content
+  std::ifstream infile(file_path);
+
+  if (!infile)
+  {
+    std::cerr << "Failed to open the file." << std::endl;
+  }
+
+  // Read the existing content line by line into a vector
+  std::vector<std::string> lines;
+  std::string line;
+  int ct = 0;
+  while (std::getline(infile, line))
+  {
+    ct++;
+    if (ct > linenum)
+    {
+      lines.push_back(line);
+    }
+  }
+
+  // Messages vector will be populated to the scheme
+  //{{timestamp1,username1,msg1},{timestamp2,username2,msg2}..}
+  std::vector<std::vector<std::string>> messages;
+
+  // Process every set of 3 lines(timestamp,user,msg) and push to vector
+  for (int i = 0; i < lines.size();)
+  {
+    std::vector<std::string> reply_msg;
+    for (int j = 0; j < 3; j++)
+    {
+      if (lines[i + j].back() == '\n')
+      {
+        lines[i + j].pop_back();
+      }
+      // slice the required string by removing the identifier i.e T, U, W
+      reply_msg.push_back(lines[i + j].substr(2));
+    }
+    messages.push_back(reply_msg);
+    i += 3;
+  }
+  return messages;
+}
+
 // Function to check if a file exists
 bool fileExists(const std::string &filePath)
 {
@@ -796,6 +912,43 @@ std::vector<std::string> get_lines_from_file(std::string filename)
   {
     getline(file, user);
     if (!user.empty())
+    {
+      users.push_back(user);
+      cout << user << endl;
+    }
+  }
+
+  file.close();
+  return users;
+}
+
+std::vector<std::string> get_lines_from_file_from_linenum(std::string filename, int linenum)
+{
+  std::vector<std::string> users;
+  std::string user;
+  std::ifstream file;
+  file.open(filename);
+
+  // Check if the file exists and can be opened
+  if (!file.is_open())
+  {
+    std::cerr << "File does not exist while trying to get lines: " << filename << ". skipping.." << std::endl;
+    return {}; // Return an empty vector
+  }
+  cout << "Lines from file: " << filename << endl;
+  if (file.peek() == std::ifstream::traits_type::eof())
+  {
+    // return empty vector if empty file
+    // std::cout<<"returned empty vector bc empty file"<<std::endl;
+    file.close();
+    return users;
+  }
+  int cur_idx = 0;
+  while (!file.eof())
+  {
+    getline(file, user);
+    cur_idx++;
+    if (!user.empty() && cur_idx > linenum)
     {
       users.push_back(user);
       cout << user << endl;
@@ -889,4 +1042,12 @@ std::string removeFileName(const std::string &input)
   }
 
   return "./" + cleanedPath.substr(0, lastSlashPos); // Include the last slash in the result
+}
+
+// Sync between master and slave
+
+std::unique_ptr<SNSService::Stub> getSlaveStub(string connection_str)
+{
+  std::shared_ptr<Channel> channelForServer = grpc::CreateChannel(connection_str, grpc::InsecureChannelCredentials());
+  return SNSService::NewStub(channelForServer);
 }

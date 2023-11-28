@@ -260,7 +260,7 @@ void run_synchronizer(std::string coordIP, std::string coordPort, std::string po
     while (true)
     {
         // change this to 30 eventually
-        sleep(4);
+        sleep(9);
         // Get other FS servers
         std::vector<zNode *> sync_servers;
         vector<std::unique_ptr<SynchService::Stub>> fs_stubs;
@@ -306,6 +306,18 @@ void run_synchronizer(std::string coordIP, std::string coordPort, std::string po
         }
         log(INFO, "**** End Follower sync *****");
 
+        log(INFO, "**** Beginning Timeline sync *****");
+        int tl_sync_result = sync_tl(sync_servers, fs_stubs, synchID);
+        if (tl_sync_result == 0)
+        {
+            log(INFO, "FOLLOW SYNC Failed.");
+        }
+        else
+        {
+            log(INFO, "FOLLOW SYNC Completed.");
+        }
+        log(INFO, "**** End Timeline sync *****");
+
         cout << endl
              << endl;
     }
@@ -319,6 +331,11 @@ int sync_tl(std::vector<zNode *> &sync_servers, vector<std::unique_ptr<SynchServ
     // read from the larger cluster_tl.txt file
     // broadcast to all FS
     vector<string> server_paths = getMatchingFilePaths(syncId, "/cluster_tl.txt");
+    if (server_paths.size() == 0)
+    {
+        cout << "No timeline files to push.." << endl;
+        return 1;
+    }
     std::uintmax_t mx = 0;
     int mx_fp = 0;
     for (int i = 0; i < server_paths.size(); i++)
@@ -336,6 +353,7 @@ int sync_tl(std::vector<zNode *> &sync_servers, vector<std::unique_ptr<SynchServ
     {
         tls.add_lines(str);
     }
+    cout << "number of lines tl lines sent from this server is: " << lines.size() << endl;
     for (auto &stub_ : fs_stubs)
     {
         ClientContext cc;
@@ -478,6 +496,8 @@ std::vector<std::string> get_lines_from_file(std::string filename)
     std::vector<std::string> users;
     std::string user;
     std::ifstream file;
+    if (!fileExists(filename))
+        return {{}};
     file.open(filename);
 
     // Check if the file exists and can be opened
