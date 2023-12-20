@@ -1,3 +1,4 @@
+The latest branch is mp2.2
 
 Compile the code using the provided makefile:
 
